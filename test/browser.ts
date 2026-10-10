@@ -21,10 +21,12 @@ import { readConfig } from '../server/config';
 import { createDevFrontend } from '../server/frontend';
 import NodeWebSocket from 'ws';
 import { observeSpeaking, checkSpeaking } from './speaking-checks';
+import { checkMessageShortcuts } from './shortcut-checks';
 import {
     checkParticipantVolume,
     checkMarkdown,
     checkClearChat,
+    checkComposerFocus,
 } from './qol-checks';
 import {
     observeAudio,
@@ -194,10 +196,20 @@ async function message(page: Page, text: string) {
     await expect(page.locator('.composer textarea')).toBeFocused();
 }
 
-try {
+async function run() {
     const alice = await participant('Alice');
     const bob = await participant('Bob');
     const charlie = await participant('Charlie');
+    if (process.env.TEST_COMPOSER === '1') {
+        await checkComposerFocus(alice.page);
+        assert.deepEqual(errors, []);
+        return;
+    }
+    if (process.env.TEST_SHORTCUTS === '1') {
+        await checkMessageShortcuts(alice.page, bob.page);
+        assert.deepEqual(errors, []);
+        return;
+    }
     await expect(alice.page.locator('.space-heading')).toContainText(
         '3 of 4 here'
     );
@@ -1058,6 +1070,9 @@ try {
 
     await checkMarkdown(alice.page, bob.page);
     await checkClearChat(alice, bob, dave);
+    await checkComposerFocus(alice.page);
+
+    await checkMessageShortcuts(alice.page, bob.page);
 
     await alice.page.setViewportSize({ width: 390, height: 844 });
     await expect(
@@ -1115,6 +1130,10 @@ try {
     console.log(
         'PASS: mobile navigation, no horizontal overflow, logout, no browser errors'
     );
+}
+
+try {
+    await run();
 } catch (error) {
     for (const context of browser.contexts())
         for (const page of context.pages()) {

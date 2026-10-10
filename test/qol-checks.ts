@@ -1,6 +1,179 @@
 import assert from 'node:assert/strict';
 import { expect, type Page, type BrowserContext } from '@playwright/test';
 
+declare global {
+    interface Window {
+        __composerSendTest?: {
+            started: boolean;
+            blurs: number;
+            release: () => void;
+            restore: () => void;
+        };
+    }
+}
+
+async function holdComposerSend(page: Page, text: string, fail = false) {
+    await page.evaluate(
+        ({ text, fail }) => {
+            const encrypt = crypto.subtle.encrypt;
+            const editor =
+                document.querySelector<HTMLTextAreaElement>(
+                    '.composer textarea'
+                )!;
+            let release!: () => void;
+            const pending = new Promise<void>((resolve) => {
+                release = resolve;
+            });
+            const test = {
+                started: false,
+                blurs: 0,
+                release,
+                onBlur() {
+                    test.blurs++;
+                },
+                restore() {
+                    crypto.subtle.encrypt = encrypt;
+                    editor.removeEventListener('blur', test.onBlur);
+                    release();
+                    delete window.__composerSendTest;
+                },
+            };
+            window.__composerSendTest = test;
+            editor.addEventListener('blur', test.onBlur);
+            // Hold only this message's encryption, not typing or presence packets.
+            crypto.subtle.encrypt = async (...args) => {
+                if (
+                    new TextDecoder().decode(args[2]) ===
+                    JSON.stringify({ kind: 'text', text })
+                ) {
+                    test.started = true;
+                    await pending;
+                    if (fail) throw new Error('Synthetic send failure');
+                }
+                return encrypt.apply(crypto.subtle, args);
+            };
+        },
+        { text, fail }
+    );
+}
+
+export async function checkComposerFocus(page: Page) {
+    const composer = page.locator('.composer textarea');
+    const sendButton = page.getByRole('button', {
+        name: 'Send message',
+        exact: true,
+    });
+    // Focus must not depend on animation frames (which browsers may delay).
+    await page.evaluate(() => {
+        const request = window.requestAnimationFrame;
+        const cancel = window.cancelAnimationFrame;
+        const pending = new Map<number, FrameRequestCallback>();
+        window.requestAnimationFrame = (callback) => {
+            const id = request(() => {});
+            pending.set(id, callback);
+            return id;
+        };
+        window.cancelAnimationFrame = (id) => {
+            pending.delete(id);
+            cancel(id);
+        };
+        (
+            window as Window & { resumeComposerFrames?: () => void }
+        ).resumeComposerFrames = () => {
+            window.requestAnimationFrame = request;
+            window.cancelAnimationFrame = cancel;
+            for (const callback of pending.values()) request(callback);
+        };
+    });
+    try {
+        for (const method of ['Enter', 'button']) {
+            const text = `Focus stays after sending with ${method}.`;
+            await composer.fill(text);
+            const border = await page
+                .locator('.composer')
+                .evaluate((node) => getComputedStyle(node).borderColor);
+            await holdComposerSend(page, text);
+            if (method === 'Enter') await page.keyboard.press('Enter');
+            else await sendButton.click();
+            await expect
+                .poll(() =>
+                    page.evaluate(() => window.__composerSendTest?.started)
+                )
+                .toBe(true);
+            await expect(composer).toBeEditable();
+            await expect(composer).toHaveValue('');
+            await expect(composer).toBeFocused();
+            assert.equal(
+                await page
+                    .locator('.composer')
+                    .evaluate((node) => getComputedStyle(node).borderColor),
+                border,
+                'the focused composer border stays steady while sending'
+            );
+            await expect(
+                page.getByRole('button', { name: 'Add emoji', exact: true })
+            ).toBeEnabled();
+            // Raw keyboard input deliberately doesn't focus the element for us.
+            await page.keyboard.type('The next message');
+            await page.keyboard.press('Enter');
+            await expect(sendButton).toBeDisabled();
+            await page.evaluate(() => window.__composerSendTest?.release());
+            await expect(page.getByText(text, { exact: true })).toBeVisible();
+            await expect(sendButton).toBeEnabled();
+            await expect(composer).toHaveValue('The next message');
+            await expect(composer).toBeFocused();
+            assert.equal(
+                await page.evaluate(() => window.__composerSendTest?.blurs),
+                0,
+                'sending never blurs the editor, even briefly'
+            );
+            await expect(
+                page
+                    .getByTestId('chat-message')
+                    .getByText('The next message', { exact: true })
+            ).toHaveCount(0);
+            await page.evaluate(() => window.__composerSendTest?.restore());
+        }
+        for (const nextDraft of ['', 'Already writing something else']) {
+            const text = 'Keep this draft if sending fails.';
+            await composer.fill(text);
+            await holdComposerSend(page, text, true);
+            await page.keyboard.press('Enter');
+            await expect(composer).toHaveValue('');
+            if (nextDraft) await page.keyboard.type(nextDraft);
+            // Completing a send must not pull focus away from another control.
+            const help = page.getByRole('button', {
+                name: 'Formatting help',
+                exact: true,
+            });
+            await help.focus();
+            await page.evaluate(() => window.__composerSendTest?.release());
+            await expect(page.locator('.toast')).toContainText(
+                'Synthetic send failure'
+            );
+            await expect(sendButton).toBeEnabled();
+            await expect(composer).toHaveValue(
+                nextDraft ? `${text}\n${nextDraft}` : text
+            );
+            await expect(help).toBeFocused();
+            await page.evaluate(() => window.__composerSendTest?.restore());
+        }
+        await composer.fill('');
+    } finally {
+        await page.evaluate(() => {
+            window.__composerSendTest?.restore();
+            (
+                window as Window & { resumeComposerFrames?: () => void }
+            ).resumeComposerFrames?.();
+            delete (window as Window & { resumeComposerFrames?: () => void })
+                .resumeComposerFrames;
+        });
+    }
+    console.log(
+        'PASS: Enter and send-button keep focus and styling throughout encryption, preserve continued typing, and restore failed drafts without stealing focus'
+    );
+}
+
 export async function checkParticipantVolume(alice: Page, bob: Page) {
     const bobId = await bob.evaluate(
         () =>

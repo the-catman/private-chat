@@ -1,5 +1,6 @@
 import React, {
     useEffect,
+    useLayoutEffect,
     useRef,
     useState,
     useSyncExternalStore,
@@ -230,6 +231,8 @@ function ChatMessage({
     selected,
     toggle,
     menu,
+    edit,
+    remove,
     editing,
     closeEditor,
 }: {
@@ -239,6 +242,8 @@ function ChatMessage({
     selected: boolean;
     toggle: (id: string, range?: boolean) => void;
     menu: (message: Message, x: number, y: number, source: HTMLElement) => void;
+    edit: (message: Message) => void;
+    remove: (message: Message, immediate?: boolean) => void;
     editing: boolean;
     closeEditor: () => void;
 }) {
@@ -251,6 +256,17 @@ function ChatMessage({
             tabIndex={0}
             onContextMenu={(event) => {
                 if (editing) return;
+                if (event.ctrlKey && !event.altKey && !event.metaKey) {
+                    if (
+                        (event.target as HTMLElement).closest(
+                            'button, input, a, audio, textarea, select, [contenteditable]'
+                        )
+                    )
+                        return;
+                    event.preventDefault();
+                    edit(message);
+                    return;
+                }
                 event.preventDefault();
                 const rect = event.currentTarget.getBoundingClientRect();
                 menu(
@@ -278,12 +294,18 @@ function ChatMessage({
             }}
             onClick={(event) => {
                 if (
-                    selectionMode &&
-                    !(event.target as HTMLElement).closest(
-                        'button, input, a, audio, textarea'
+                    editing ||
+                    (event.target as HTMLElement).closest(
+                        'button, input, a, audio, textarea, select, [contenteditable]'
                     )
                 )
-                    toggle(message.id, event.shiftKey);
+                    return;
+                if (event.ctrlKey && !event.altKey && !event.metaKey) {
+                    event.preventDefault();
+                    remove(message, event.shiftKey);
+                    return;
+                }
+                if (selectionMode) toggle(message.id, event.shiftKey);
             }}
         >
             {selectionMode && (
@@ -348,6 +370,7 @@ function ChatMessage({
                         message={message}
                         client={client}
                         close={closeEditor}
+                        remove={() => remove(message)}
                     />
                 ) : message.payload.kind === 'voice' ? (
                     <VoiceNote content={message.payload} />
@@ -408,6 +431,10 @@ function Composer({
     const [file, setFile] = useState<File | null>(null);
     const fileInput = useRef<HTMLInputElement>(null);
     const [sending, setSending] = useState(false);
+    const sendInFlight = useRef(false);
+    const [completedSend, setCompletedSend] = useState<{
+        scope: string;
+    } | null>(null);
     const [recording, setRecording] = useState(false);
     const [seconds, setSeconds] = useState(0);
     const [voice, setVoice] = useState<Extract<
@@ -425,6 +452,12 @@ function Composer({
     const cancelled = useRef(false);
     const text = drafts[state.scope] || '';
     const input = useRef<HTMLTextAreaElement>(null);
+    useLayoutEffect(() => {
+        // File and voice previews disable the editor until React removes them.
+        // Text sends keep focus throughout and need no completion-time refocus.
+        if (completedSend?.scope === currentScope.current)
+            input.current?.focus({ preventScroll: true });
+    }, [completedSend]);
     const suggestions =
         !emojiDismissed && !emojis && !file && !voice
             ? emojiQuery(text, cursor)
@@ -491,9 +524,9 @@ function Composer({
         return () => document.removeEventListener('pointerdown', dismiss);
     }, [Boolean(suggestions)]);
     useEffect(() => {
-        if (offline || recording || sending) setEmojis(false);
-    }, [offline, recording, sending]);
-    useEffect(() => {
+        if (offline || recording) setEmojis(false);
+    }, [offline, recording]);
+    useLayoutEffect(() => {
         const element = input.current;
         if (!element) return;
         element.style.height = 'auto';
@@ -619,9 +652,25 @@ function Composer({
         }
     }
     async function send() {
-        if (offline || sending || (!text.trim() && !voice && !file)) return;
+        if (
+            offline ||
+            sendInFlight.current ||
+            (!text.trim() && !voice && !file)
+        )
+            return;
         const scope = state.scope;
+        const isText = !file && !voice;
+        sendInFlight.current = true;
         setSending(true);
+        setEmojis(false);
+        setEmojiDismissed(true);
+        if (isText) {
+            // Keep the editor live while encryption runs. Completion must not
+            // clear anything the user has already typed for their next message.
+            setDrafts((values) => ({ ...values, [scope]: '' }));
+            setCursor(0);
+            input.current?.focus({ preventScroll: true });
+        }
         try {
             const payload: Content = file
                 ? {
@@ -633,21 +682,24 @@ function Composer({
                   }
                 : voice || { kind: 'text', text: replaceEmoji(text.trim()) };
             await client.send(payload, scope);
-            if (file) setFile(null);
-            else if (voice) setVoice(null);
-            else setDrafts((values) => ({ ...values, [scope]: '' }));
+            if (file) setFile((current) => (current === file ? null : current));
+            else if (voice)
+                setVoice((current) => (current === voice ? null : current));
         } catch (error) {
+            if (isText)
+                setDrafts((values) => ({
+                    ...values,
+                    [scope]: values[scope] ? `${text}\n${values[scope]}` : text,
+                }));
             client.notify(
                 error instanceof Error
                     ? error.message
                     : 'Message could not be sent.'
             );
         } finally {
+            sendInFlight.current = false;
             setSending(false);
-            requestAnimationFrame(() => {
-                if (mounted.current && currentScope.current === scope)
-                    input.current?.focus();
-            });
+            if (!isText) setCompletedSend({ scope });
         }
     }
     const typing = state.peers.filter(
@@ -659,12 +711,12 @@ function Composer({
         <div
             className="composer-wrap"
             onDragOver={(event) => {
-                if (!offline && !recording && !voice && !sending)
+                if (!offline && !recording && !voice && !(sending && file))
                     event.preventDefault();
             }}
             onDrop={(event) => {
                 event.preventDefault();
-                if (!offline && !recording && !voice && !sending)
+                if (!offline && !recording && !voice && !(sending && file))
                     attach(event.dataTransfer.files[0]);
             }}
         >
@@ -788,10 +840,7 @@ function Composer({
                             rows={1}
                             maxLength={4000}
                             disabled={
-                                offline ||
-                                Boolean(voice) ||
-                                Boolean(file) ||
-                                sending
+                                offline || Boolean(voice) || Boolean(file)
                             }
                             onKeyDown={(event) => {
                                 if (event.nativeEvent.isComposing) return;
@@ -836,9 +885,14 @@ function Composer({
                                 }
                                 if (
                                     event.key === 'ArrowUp' &&
+                                    !event.ctrlKey &&
+                                    !event.shiftKey &&
+                                    !event.altKey &&
+                                    !event.metaKey &&
                                     !text &&
                                     !voice &&
-                                    !file
+                                    !file &&
+                                    !sending
                                 ) {
                                     event.preventDefault();
                                     editLast();
@@ -858,7 +912,11 @@ function Composer({
                             <IconButton
                                 icon="attach"
                                 label="Attach file (up to 5 MB)"
-                                disabled={offline || Boolean(voice) || sending}
+                                disabled={
+                                    offline ||
+                                    Boolean(voice) ||
+                                    (sending && Boolean(file))
+                                }
                                 onClick={() => fileInput.current?.click()}
                             />
                             <span ref={emojiTrigger}>
@@ -871,8 +929,7 @@ function Composer({
                                     disabled={
                                         offline ||
                                         Boolean(voice) ||
-                                        Boolean(file) ||
-                                        sending
+                                        Boolean(file)
                                     }
                                     onClick={() => {
                                         setEmojis(!emojis);
@@ -886,10 +943,7 @@ function Composer({
                                 icon="mic"
                                 label="Record voice note"
                                 disabled={
-                                    offline ||
-                                    Boolean(voice) ||
-                                    Boolean(file) ||
-                                    sending
+                                    offline || Boolean(voice) || Boolean(file)
                                 }
                                 onClick={() => void record()}
                             />
@@ -901,6 +955,10 @@ function Composer({
                                     sending ||
                                     (!text.trim() && !voice && !file)
                                 }
+                                onMouseDown={(event) => {
+                                    if (event.button === 0)
+                                        event.preventDefault();
+                                }}
                                 onClick={() => void send()}
                             >
                                 <Icon name="send" size={20} />
@@ -1142,6 +1200,7 @@ function App() {
     } | null>(null);
     const menuOrigin = useRef<HTMLElement | null>(null);
     const selectionAnchor = useRef<string | null>(null);
+    const deleting = useRef(new Set<string>());
     const bottom = useRef<HTMLDivElement>(null);
     const scroll = useRef<HTMLDivElement>(null);
     const nearBottom = useRef(true);
@@ -1300,6 +1359,48 @@ function App() {
         setMenu(null);
         menuOrigin.current?.focus({ preventScroll: true });
     };
+    const canManage = (message: Message) =>
+        state.phase === 'online' &&
+        message.scope === state.scope &&
+        message.from === self &&
+        message.status === 'sent';
+    const editMessage = (message: Message) => {
+        if (!canManage(message) || message.payload.kind !== 'text') return;
+        setMenu(null);
+        setEditing(message.id);
+    };
+    const deleteMessage = (message: Message, immediate = false) => {
+        if (!canManage(message) || deleting.current.has(message.id)) return;
+        setMenu(null);
+        if (!immediate) {
+            setActionDialog({ type: 'delete', ids: [message.id] });
+            return;
+        }
+        deleting.current.add(message.id);
+        void client
+            .deleteMessages([message.id])
+            .then(() => {
+                setEditing((id) => (id === message.id ? null : id));
+                client.notify('Message deleted.');
+                if (
+                    client.getSnapshot().scope === message.scope &&
+                    document.activeElement === document.body
+                )
+                    document
+                        .querySelector<HTMLTextAreaElement>(
+                            '.composer textarea'
+                        )
+                        ?.focus({ preventScroll: true });
+            })
+            .catch((error: unknown) =>
+                client.notify(
+                    error instanceof Error
+                        ? error.message
+                        : 'Could not delete this message.'
+                )
+            )
+            .finally(() => deleting.current.delete(message.id));
+    };
     const menuMessage = state.messages.find((m) => m.id === menu?.id);
     const menuActions: MenuAction[] = menuMessage
         ? [
@@ -1333,10 +1434,11 @@ function App() {
                         {
                             label: 'Edit message',
                             icon: 'edit',
+                            hint: 'Ctrl + right-click · Up Arrow from an empty message box edits your latest message',
                             disabled:
                                 menuMessage.status !== 'sent' ||
                                 state.phase !== 'online',
-                            run: () => setEditing(menuMessage.id),
+                            run: () => editMessage(menuMessage),
                         },
                     ]
                   : []),
@@ -1369,15 +1471,12 @@ function App() {
                         {
                             label: 'Delete message',
                             icon: 'trash',
+                            hint: 'Ctrl + click · Add Shift to skip confirmation',
                             danger: true,
                             disabled:
                                 menuMessage.status !== 'sent' ||
                                 state.phase !== 'online',
-                            run: () =>
-                                setActionDialog({
-                                    type: 'delete',
-                                    ids: [menuMessage.id],
-                                }),
+                            run: () => deleteMessage(menuMessage),
                         },
                     ]
                   : []),
@@ -1805,6 +1904,8 @@ function App() {
                                     selectionMode={selectionMode}
                                     toggle={toggle}
                                     menu={openMenu}
+                                    edit={editMessage}
+                                    remove={deleteMessage}
                                     editing={editing === item.id}
                                     closeEditor={() => {
                                         setEditing(null);
@@ -1956,7 +2057,7 @@ function App() {
                                     m.payload.kind === 'text' &&
                                     m.status === 'sent'
                             );
-                        if (latest) setEditing(latest.id);
+                        if (latest) editMessage(latest);
                     }}
                 />
             </section>
@@ -2042,6 +2143,16 @@ function App() {
                         setActionDialog(null);
                         setSelected([]);
                         setSelectionMode(false);
+                        if (actionDialog.type === 'delete') {
+                            setEditing((id) =>
+                                id && actionDialog.ids.includes(id) ? null : id
+                            );
+                            document
+                                .querySelector<HTMLTextAreaElement>(
+                                    '.composer textarea'
+                                )
+                                ?.focus({ preventScroll: true });
+                        }
                     }}
                 />
             )}

@@ -46,6 +46,7 @@ export type MenuAction = {
     run: () => void;
     danger?: boolean;
     disabled?: boolean;
+    hint?: string;
 };
 export function MessageMenu({
     x,
@@ -128,6 +129,7 @@ export function MessageMenu({
                     key={action.label}
                     className={action.danger ? 'destructive-text' : ''}
                     disabled={action.disabled}
+                    title={action.hint}
                     onClick={() => {
                         close();
                         action.run();
@@ -145,18 +147,27 @@ export function MessageEditor({
     message,
     client,
     close,
+    remove,
 }: {
     message: Message;
     client: ChatClient;
     close: () => void;
+    remove: () => void;
 }) {
     const [text, setText] = useState(
         message.payload.kind === 'text' ? message.payload.text : ''
     );
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const input = useRef<HTMLTextAreaElement>(null);
     const save = async () => {
-        if (busy || !text.trim()) return;
+        if (busy) return;
+        if (!text.trim()) {
+            setError('');
+            input.current?.focus({ preventScroll: true });
+            remove();
+            return;
+        }
         setBusy(true);
         setError('');
         try {
@@ -175,6 +186,7 @@ export function MessageEditor({
     return (
         <div className="message-editor">
             <textarea
+                ref={input}
                 aria-label="Edit message"
                 autoFocus
                 value={text}
@@ -212,10 +224,10 @@ export function MessageEditor({
                 </button>
                 <button
                     className="small-primary"
-                    disabled={busy || !text.trim()}
+                    disabled={busy}
                     onClick={() => void save()}
                 >
-                    {busy ? 'Saving…' : 'Save'}
+                    {busy ? 'Saving…' : text.trim() ? 'Save' : 'Delete…'}
                 </button>
             </div>
         </div>
@@ -252,6 +264,10 @@ export function MessageActionDialog({
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
+    const dismiss = () => {
+        dialog.current?.close();
+        close();
+    };
     const sharing = action.type === 'share';
     const missing = messages.length !== action.ids.length;
     const newMessages = messages.filter((m) => !m.audience.includes(target));
@@ -269,6 +285,7 @@ export function MessageActionDialog({
                     ? `Shared history with ${peers.find((p) => p.id === target)?.name || 'your friend'}.`
                     : `Deleted ${action.ids.length} message${action.ids.length === 1 ? '' : 's'}.`
             );
+            dialog.current?.close();
             done();
         } catch (error) {
             setError(
@@ -287,10 +304,10 @@ export function MessageActionDialog({
             aria-labelledby="message-action-title"
             onCancel={(event) => {
                 event.preventDefault();
-                if (!busy) close();
+                if (!busy) dismiss();
             }}
             onClick={(event) => {
-                if (!busy && event.target === event.currentTarget) close();
+                if (!busy && event.target === event.currentTarget) dismiss();
             }}
         >
             <div className="modal-content">
@@ -298,7 +315,7 @@ export function MessageActionDialog({
                     className="icon-button modal-close"
                     aria-label="Close message dialog"
                     disabled={busy}
-                    onClick={close}
+                    onClick={dismiss}
                 >
                     <Icon name="close" />
                 </button>
@@ -374,7 +391,7 @@ export function MessageActionDialog({
                     <button
                         className="subtle-button"
                         disabled={busy}
-                        onClick={close}
+                        onClick={dismiss}
                     >
                         Cancel
                     </button>
