@@ -1,0 +1,257 @@
+/* Keep interface chrome from highlighting during clicks and drags. */
+button,
+label,
+.avatar,
+.sidebar,
+.conversation-header,
+.members-panel,
+.call-panel,
+.call-detached,
+.message-meta,
+.message-note,
+.day-divider,
+.presence-event,
+.composer-foot,
+.selection-bar,
+.typing-line,
+.modal h2,
+.modal legend,
+.volume-popover {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.markdown,
+.message-editor textarea,
+input:not([type='range']):not([type='radio']):not([type='checkbox']),
+textarea,
+.markdown-example > code {
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+.formatting-help-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+.formatting-help-button:hover {
+    color: var(--accent);
+}
+.message-text.markdown {
+    white-space: normal;
+    line-height: 1.6;
+}
+.markdown > :first-child {
+    margin-top: 0;
+}
+.markdown > :last-child {
+    margin-bottom: 0;
+}
+.markdown p {
+    margin: 0.45em 0;
+    white-space: pre-wrap;
+}
+.markdown a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.markdown :is(ul, ol) {
+    padding-left: 1.6em;
+    margin: 0.5em 0;
+}
+.markdown li {
+    margin: 0.15em 0;
+}
+.markdown blockquote {
+    margin: 0.5em 0;
+    border-left: 3px solid var(--accent);
+    padding: 0.1em 1em;
+    color: var(--muted);
+}
+.markdown :is(h1, h2, h3, h4, h5, h6) {
+    font-size: 1.1em;
+    margin: 0.65em 0 0.3em;
+    line-height: 1.4;
+}
+.markdown code,
+.markdown-example > code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.9em;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 0.12em 0.3em;
+    background: var(--hover);
+    white-space: pre-wrap;
+}
+.markdown pre {
+    max-width: 100%;
+    overflow: auto;
+    margin: 0.55em 0;
+    padding: 12px 15px;
+    background: var(--sidebar);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    white-space: pre;
+    line-height: 1.5;
+    tab-size: 4;
+}
+.markdown pre code {
+    background: none;
+    border: 0;
+    padding: 0;
+    white-space: pre;
+}
+.markdown hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 1em 0;
+}
+.markdown-table {
+    max-width: 100%;
+    overflow: auto;
+    margin: 0.6em 0;
+}
+.markdown table {
+    border-collapse: collapse;
+    text-align: left;
+}
+.markdown :is(th, td) {
+    border: 1px solid var(--line);
+    padding: 5px 10px;
+}
+.markdown th {
+    background: var(--hover);
+}
+.markdown .contains-task-list {
+    list-style: none;
+    padding-left: 0.2em;
+}
+.markdown input[type='checkbox'] {
+    margin-right: 0.5em;
+}
+.markdown-image-label {
+    color: var(--muted);
+}
+.markdown-help {
+    width: min(720px, calc(100vw - 32px));
+}
+.markdown-help .modal-content {
+    padding: 28px;
+}
+.markdown-examples {
+    display: grid;
+    gap: 0;
+    margin: 16px 0 24px;
+}
+.markdown-example {
+    display: grid;
+    grid-template-columns: 100px minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 16px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.875rem;
+}
+.markdown-example > span {
+    color: var(--muted);
+    user-select: none;
+}
+.markdown-example > code {
+    overflow-wrap: anywhere;
+}
+.markdown-example .message-text {
+    margin: 0;
+    font-size: inherit;
+}
+.markdown-help .primary {
+    width: 100%;
+}
+.participant-volume {
+    display: inline-flex;
+}
+.participant-volume.locally-muted > button {
+    color: var(--danger);
+}
+.volume-popover {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    width: 250px;
+    max-width: calc(100vw - 16px);
+    padding: 16px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    font-size: 0.875rem;
+    text-align: left;
+}
+.volume-heading,
+.volume-caption {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+.volume-heading strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.volume-heading output {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+.volume-popover input {
+    width: 100%;
+    margin: 14px 0 10px;
+    accent-color: var(--accent-solid);
+    cursor: pointer;
+}
+.volume-caption {
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+.volume-caption button {
+    padding: 0;
+    color: var(--accent);
+}
+.video-tile > .participant-volume {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    z-index: 1;
+}
+.video-tile > .participant-volume > button {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: var(--panel);
+    box-shadow: 0 1px 6px #0002;
+}
+.member-item .participant-volume > button {
+    width: 28px;
+    height: 32px;
+}
+.clear-chat-dialog .dialog-actions {
+    gap: 12px;
+}
+
+@media (max-width: 560px) {
+    .markdown-example {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 8px 12px;
+    }
+    .markdown-example > span {
+        grid-column: 1 / -1;
+    }
+    .markdown-help .modal-content {
+        padding: 24px 20px;
+    }
+}
