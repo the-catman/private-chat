@@ -16,10 +16,18 @@ import { AppearanceControls } from './components/Appearance';
 import { EmojiPicker } from './components/EmojiPicker';
 import { LogoutDialog } from './components/LogoutDialog';
 import { MarkdownMessage, MarkdownHelp } from './components/MarkdownMessage';
+import {
+    MessageInput,
+    type MessageInputHandle,
+} from './components/MessageInput';
+import { ShortcutHelp } from './components/ShortcutHelp';
+import { FileAttachment } from './components/FileAttachment';
 import { ParticipantVolume } from './components/ParticipantVolume';
 import { ConversationActions } from './components/ConversationActions';
+import { useChatViewport, useMobileLayout } from './components/useMobileLayout';
+import { useMobilePanel } from './components/useMobilePanel';
+import { SheetHandle } from './components/SheetHandle';
 import {
-    FileAttachment,
     MessageMenu,
     MessageEditor,
     MessageActionDialog,
@@ -33,6 +41,8 @@ import './fonts.css';
 import './style.css';
 import './components/call.css';
 import './components/chat-qol.css';
+import './components/message-tools.css';
+import './components/mobile.css';
 import { installSoundActivation, playSound } from './lib/sounds';
 import { captureMicrophone } from './lib/microphone';
 
@@ -420,9 +430,15 @@ function Composer({
     recipient?: Peer;
     editLast: () => void;
 }) {
+    const mobile = useMobileLayout();
     const [drafts, setDrafts] = useState<Record<string, string>>({});
+    const [options, setOptions] = useState<{ x: number; y: number } | null>(
+        null
+    );
+    const optionsTrigger = useRef<HTMLButtonElement>(null);
     const [emojis, setEmojis] = useState(false);
     const [formatting, setFormatting] = useState(false);
+    const [shortcuts, setShortcuts] = useState(false);
     const emojiTrigger = useRef<HTMLSpanElement>(null);
     const suggestionPanel = useRef<HTMLDivElement>(null);
     const [cursor, setCursor] = useState(0);
@@ -451,7 +467,7 @@ function Composer({
     const requestingMic = useRef(false);
     const cancelled = useRef(false);
     const text = drafts[state.scope] || '';
-    const input = useRef<HTMLTextAreaElement>(null);
+    const input = useRef<MessageInputHandle>(null);
     useLayoutEffect(() => {
         // File and voice previews disable the editor until React removes them.
         // Text sends keep focus throughout and need no completion-time refocus.
@@ -516,7 +532,7 @@ function Composer({
         const dismiss = (event: PointerEvent) => {
             if (
                 !suggestionPanel.current?.contains(event.target as Node) &&
-                event.target !== input.current
+                !input.current?.element?.contains(event.target as Node)
             )
                 setEmojiDismissed(true);
         };
@@ -524,14 +540,11 @@ function Composer({
         return () => document.removeEventListener('pointerdown', dismiss);
     }, [Boolean(suggestions)]);
     useEffect(() => {
-        if (offline || recording) setEmojis(false);
+        if (offline || recording) {
+            setEmojis(false);
+            setOptions(null);
+        }
     }, [offline, recording]);
-    useLayoutEffect(() => {
-        const element = input.current;
-        if (!element) return;
-        element.style.height = 'auto';
-        element.style.height = `${Math.min(element.scrollHeight, 160)}px`;
-    }, [text, state.scope, recording, file, voice]);
     useEffect(
         () => () => {
             mounted.current = false;
@@ -548,6 +561,7 @@ function Composer({
         setFile(null);
         setEmojiDismissed(true);
         setEmojis(false);
+        setOptions(null);
         if (recorder.current?.state === 'recording') {
             cancelled.current = true;
             recorder.current.stop();
@@ -766,206 +780,273 @@ function Composer({
                 </div>
             )}
             <div className={`composer ${offline ? 'disabled' : ''}`}>
-                {recording ? (
-                    <>
-                        <span className="recording-dot" />
-                        <span className="recording-label">
-                            Recording <b>{minutes(seconds)}</b>
-                            <small>2 min maximum</small>
-                        </span>
-                        <IconButton
-                            icon="trash"
-                            label="Cancel recording"
-                            onClick={() => {
-                                cancelled.current = true;
-                                recorder.current?.stop();
-                            }}
-                        />
-                        <button
-                            className="record-stop"
-                            onClick={() => recorder.current?.stop()}
-                        >
-                            <Icon name="stop" size={18} /> Finish
-                        </button>
-                    </>
-                ) : (
-                    <>
-                        <textarea
-                            ref={input}
-                            aria-autocomplete="list"
-                            aria-controls={
-                                suggestions ? 'emoji-suggestions' : undefined
-                            }
-                            aria-activedescendant={
-                                suggestions
-                                    ? `emoji-option-${Math.min(emojiIndex, suggestions.results.length - 1)}`
-                                    : undefined
-                            }
-                            aria-label={
-                                recipient
-                                    ? `Message ${recipient.name}`
-                                    : 'Message the living room'
-                            }
-                            placeholder={
-                                offline
-                                    ? 'Waiting for a connection…'
-                                    : file
-                                      ? 'Your file is ready to send'
-                                      : voice
-                                        ? 'Your voice note is ready to send'
-                                        : recipient
-                                          ? `Message ${recipient.name}`
-                                          : 'Message the living room'
-                            }
-                            value={text}
-                            onChange={(event) => {
-                                setDrafts((values) => ({
-                                    ...values,
-                                    [state.scope]: event.target.value,
-                                }));
-                                setCursor(event.target.selectionStart);
-                                setEmojiIndex(0);
-                                setEmojiDismissed(false);
-                                void client.typing();
-                            }}
-                            onSelect={(event) =>
-                                setCursor(event.currentTarget.selectionStart)
-                            }
-                            onPaste={(event) => {
-                                if (event.clipboardData.files[0]) {
-                                    event.preventDefault();
-                                    attach(event.clipboardData.files[0]);
-                                }
-                            }}
-                            rows={1}
-                            maxLength={4000}
-                            disabled={
-                                offline || Boolean(voice) || Boolean(file)
-                            }
-                            onKeyDown={(event) => {
-                                if (event.nativeEvent.isComposing) return;
-                                if (
-                                    suggestions &&
-                                    [
-                                        'ArrowDown',
-                                        'ArrowUp',
-                                        'Enter',
-                                        'Tab',
-                                        'Escape',
-                                    ].includes(event.key)
-                                ) {
-                                    event.preventDefault();
-                                    if (event.key === 'Escape')
-                                        setEmojiDismissed(true);
-                                    else if (
-                                        event.key === 'ArrowDown' ||
-                                        event.key === 'ArrowUp'
-                                    )
-                                        setEmojiIndex(
-                                            (value) =>
-                                                (value +
-                                                    (event.key === 'ArrowDown'
-                                                        ? 1
-                                                        : -1) +
-                                                    suggestions.results
-                                                        .length) %
-                                                suggestions.results.length
-                                        );
-                                    else
-                                        insertEmoji(
-                                            suggestions.results[
-                                                Math.min(
-                                                    emojiIndex,
-                                                    suggestions.results.length -
-                                                        1
-                                                )
-                                            ]
-                                        );
-                                    return;
-                                }
-                                if (
-                                    event.key === 'ArrowUp' &&
-                                    !event.ctrlKey &&
-                                    !event.shiftKey &&
-                                    !event.altKey &&
-                                    !event.metaKey &&
-                                    !text &&
-                                    !voice &&
-                                    !file &&
-                                    !sending
-                                ) {
-                                    event.preventDefault();
-                                    editLast();
-                                    return;
-                                }
-                                if (
-                                    event.key === 'Enter' &&
-                                    !event.shiftKey &&
-                                    !event.nativeEvent.isComposing
-                                ) {
-                                    event.preventDefault();
-                                    void send();
-                                }
-                            }}
-                        />
-                        <div className="composer-tools">
-                            <IconButton
-                                icon="attach"
-                                label="Attach file (up to 5 MB)"
-                                disabled={
-                                    offline ||
-                                    Boolean(voice) ||
-                                    (sending && Boolean(file))
-                                }
-                                onClick={() => fileInput.current?.click()}
-                            />
-                            <span ref={emojiTrigger}>
-                                <button
-                                    className={`icon-button ${emojis ? 'active' : ''}`}
-                                    aria-label="Add emoji"
-                                    title="Add emoji"
-                                    aria-expanded={emojis}
-                                    aria-haspopup="dialog"
-                                    disabled={
-                                        offline ||
-                                        Boolean(voice) ||
-                                        Boolean(file)
-                                    }
-                                    onClick={() => {
-                                        setEmojis(!emojis);
-                                        setEmojiDismissed(true);
-                                    }}
-                                >
-                                    <Icon name="smile" />
-                                </button>
+                <div className="composer-input-row">
+                    {recording ? (
+                        <>
+                            <span className="recording-dot" />
+                            <span className="recording-label">
+                                Recording <b>{minutes(seconds)}</b>
+                                <small>2 min maximum</small>
                             </span>
                             <IconButton
-                                icon="mic"
-                                label="Record voice note"
+                                icon="trash"
+                                label="Cancel recording"
+                                onClick={() => {
+                                    cancelled.current = true;
+                                    recorder.current?.stop();
+                                }}
+                            />
+                            <button
+                                className="record-stop"
+                                onClick={() => recorder.current?.stop()}
+                            >
+                                <Icon name="stop" size={18} /> Finish
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            {mobile && (
+                                <span
+                                    ref={emojiTrigger}
+                                    className="composer-options"
+                                >
+                                    <button
+                                        ref={optionsTrigger}
+                                        className="icon-button"
+                                        aria-label="Message options"
+                                        aria-haspopup="dialog"
+                                        aria-expanded={Boolean(options)}
+                                        disabled={offline}
+                                        onClick={(event) => {
+                                            setEmojis(false);
+                                            setEmojiDismissed(true);
+                                            const box =
+                                                event.currentTarget.getBoundingClientRect();
+                                            setOptions({
+                                                x: box.left,
+                                                y: box.top,
+                                            });
+                                        }}
+                                    >
+                                        <Icon name="plus" />
+                                    </button>
+                                </span>
+                            )}
+                            <MessageInput
+                                key={state.scope}
+                                ref={input}
+                                suggestions={
+                                    suggestions
+                                        ? {
+                                              controls: 'emoji-suggestions',
+                                              active: `emoji-option-${Math.min(emojiIndex, suggestions.results.length - 1)}`,
+                                          }
+                                        : undefined
+                                }
+                                label={
+                                    recipient
+                                        ? `Message ${recipient.name}`
+                                        : 'Message the living room'
+                                }
+                                placeholder={
+                                    offline
+                                        ? mobile
+                                            ? 'Waiting to connect…'
+                                            : 'Waiting for a connection…'
+                                        : file
+                                          ? mobile
+                                              ? 'File ready to send'
+                                              : 'Your file is ready to send'
+                                          : voice
+                                            ? mobile
+                                                ? 'Voice note ready'
+                                                : 'Your voice note is ready to send'
+                                            : mobile
+                                              ? 'Message…'
+                                              : recipient
+                                                ? `Message ${recipient.name}`
+                                                : 'Message the living room'
+                                }
+                                value={text}
+                                onChange={(value, cursor) => {
+                                    setDrafts((values) => ({
+                                        ...values,
+                                        [state.scope]: value,
+                                    }));
+                                    setCursor(cursor);
+                                    setEmojiIndex(0);
+                                    setEmojiDismissed(false);
+                                    void client.typing();
+                                }}
+                                onSelect={setCursor}
+                                onLimit={() =>
+                                    client.notify(
+                                        'Messages can be up to 4,000 characters.'
+                                    )
+                                }
+                                onPaste={(event) => {
+                                    if (event.clipboardData?.files[0]) {
+                                        event.preventDefault();
+                                        attach(event.clipboardData.files[0]);
+                                    }
+                                }}
+                                enterKeyHint={mobile ? 'enter' : 'send'}
                                 disabled={
                                     offline || Boolean(voice) || Boolean(file)
                                 }
-                                onClick={() => void record()}
-                            />
-                            <button
-                                className="send-button"
-                                aria-label="Send message"
-                                disabled={
-                                    offline ||
-                                    sending ||
-                                    (!text.trim() && !voice && !file)
-                                }
-                                onMouseDown={(event) => {
-                                    if (event.button === 0)
+                                onKeyDown={(event) => {
+                                    if (event.isComposing) return;
+                                    if (
+                                        suggestions &&
+                                        [
+                                            'ArrowDown',
+                                            'ArrowUp',
+                                            'Enter',
+                                            'Tab',
+                                            'Escape',
+                                        ].includes(event.key)
+                                    ) {
                                         event.preventDefault();
+                                        if (event.key === 'Escape')
+                                            setEmojiDismissed(true);
+                                        else if (
+                                            event.key === 'ArrowDown' ||
+                                            event.key === 'ArrowUp'
+                                        )
+                                            setEmojiIndex(
+                                                (value) =>
+                                                    (value +
+                                                        (event.key ===
+                                                        'ArrowDown'
+                                                            ? 1
+                                                            : -1) +
+                                                        suggestions.results
+                                                            .length) %
+                                                    suggestions.results.length
+                                            );
+                                        else
+                                            insertEmoji(
+                                                suggestions.results[
+                                                    Math.min(
+                                                        emojiIndex,
+                                                        suggestions.results
+                                                            .length - 1
+                                                    )
+                                                ]
+                                            );
+                                        return;
+                                    }
+                                    if (
+                                        event.key === 'ArrowUp' &&
+                                        !event.ctrlKey &&
+                                        !event.shiftKey &&
+                                        !event.altKey &&
+                                        !event.metaKey &&
+                                        !text &&
+                                        !voice &&
+                                        !file &&
+                                        !sending
+                                    ) {
+                                        event.preventDefault();
+                                        editLast();
+                                        return;
+                                    }
+                                    if (
+                                        event.key === 'Enter' &&
+                                        !event.shiftKey &&
+                                        !event.isComposing &&
+                                        (!mobile ||
+                                            !window.matchMedia(
+                                                '(pointer: coarse)'
+                                            ).matches ||
+                                            event.ctrlKey ||
+                                            event.metaKey)
+                                    ) {
+                                        event.preventDefault();
+                                        void send();
+                                    }
                                 }}
-                                onClick={() => void send()}
-                            >
-                                <Icon name="send" size={20} />
-                            </button>
-                        </div>
-                    </>
-                )}
+                            />
+                            <div className="composer-tools">
+                                {!mobile && (
+                                    <>
+                                        <IconButton
+                                            icon="attach"
+                                            label="Attach file (up to 5 MB)"
+                                            disabled={
+                                                offline ||
+                                                Boolean(voice) ||
+                                                (sending && Boolean(file))
+                                            }
+                                            onClick={() =>
+                                                fileInput.current?.click()
+                                            }
+                                        />
+                                        <span ref={emojiTrigger}>
+                                            <button
+                                                className={`icon-button ${emojis ? 'active' : ''}`}
+                                                aria-label="Add emoji"
+                                                title="Add emoji"
+                                                aria-expanded={emojis}
+                                                aria-haspopup="dialog"
+                                                disabled={
+                                                    offline ||
+                                                    Boolean(voice) ||
+                                                    Boolean(file)
+                                                }
+                                                onClick={() => {
+                                                    setEmojis(!emojis);
+                                                    setEmojiDismissed(true);
+                                                }}
+                                            >
+                                                <Icon name="smile" />
+                                            </button>
+                                        </span>
+                                        <IconButton
+                                            icon="mic"
+                                            label="Record voice note"
+                                            disabled={
+                                                offline ||
+                                                Boolean(voice) ||
+                                                Boolean(file)
+                                            }
+                                            onClick={() => void record()}
+                                        />
+                                    </>
+                                )}
+                                {mobile &&
+                                !text.trim() &&
+                                !voice &&
+                                !file &&
+                                !sending ? (
+                                    <IconButton
+                                        icon="mic"
+                                        label="Record voice note"
+                                        disabled={offline}
+                                        onClick={() => void record()}
+                                    />
+                                ) : (
+                                    <button
+                                        className="send-button"
+                                        aria-label="Send message"
+                                        disabled={
+                                            offline ||
+                                            sending ||
+                                            (!text.trim() && !voice && !file)
+                                        }
+                                        onMouseDown={(event) => {
+                                            if (event.button === 0)
+                                                event.preventDefault();
+                                        }}
+                                        onClick={() => void send()}
+                                    >
+                                        <Icon name="send" size={20} />
+                                    </button>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
                 {suggestions && (
                     <div
                         ref={suggestionPanel}
@@ -1010,6 +1091,47 @@ function Composer({
                     />
                 )}
             </div>
+            {options && (
+                <MessageMenu
+                    {...options}
+                    label="Message options"
+                    close={() => {
+                        setOptions(null);
+                        optionsTrigger.current?.focus({ preventScroll: true });
+                    }}
+                    actions={[
+                        {
+                            label: 'Attach file (up to 5 MB)',
+                            icon: 'attach',
+                            disabled:
+                                Boolean(voice) || (sending && Boolean(file)),
+                            run: () => fileInput.current?.click(),
+                        },
+                        {
+                            label: 'Add emoji',
+                            icon: 'smile',
+                            disabled: Boolean(voice) || Boolean(file),
+                            run: () => setEmojis(true),
+                        },
+                        {
+                            label: 'Record voice note',
+                            icon: 'mic',
+                            disabled: Boolean(voice) || Boolean(file),
+                            run: () => void record(),
+                        },
+                        {
+                            label: 'Formatting help',
+                            icon: 'markdown',
+                            run: () => setFormatting(true),
+                        },
+                        {
+                            label: 'Shortcut help',
+                            icon: 'keyboard',
+                            run: () => setShortcuts(true),
+                        },
+                    ]}
+                />
+            )}
             <div className="composer-foot">
                 <button
                     className="formatting-help-button"
@@ -1017,11 +1139,25 @@ function Composer({
                 >
                     <Icon name="markdown" size={18} /> Formatting help
                 </button>
+                <button
+                    className="formatting-help-button"
+                    onClick={() => setShortcuts(true)}
+                >
+                    <Icon name="keyboard" size={18} /> Shortcut help
+                </button>
             </div>
             {formatting && (
                 <MarkdownHelp
                     close={() => {
                         setFormatting(false);
+                        requestAnimationFrame(() => input.current?.focus());
+                    }}
+                />
+            )}
+            {shortcuts && (
+                <ShortcutHelp
+                    close={() => {
+                        setShortcuts(false);
                         requestAnimationFrame(() => input.current?.focus());
                     }}
                 />
@@ -1042,6 +1178,7 @@ function ModalView({
     const [code, setCode] = useState('');
     const [verified, setVerified] = useState(false);
     const ref = useRef<HTMLDialogElement>(null);
+    const dismiss = useMobilePanel(ref, close);
     useEffect(() => {
         ref.current?.showModal();
     }, []);
@@ -1053,16 +1190,20 @@ function ModalView({
         <dialog
             ref={ref}
             className="modal"
-            onCancel={close}
+            onCancel={(event) => {
+                event.preventDefault();
+                dismiss();
+            }}
             onClick={(event) => {
-                if (event.target === event.currentTarget) close();
+                if (event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <IconButton
                     icon="close"
                     label="Close dialog"
-                    onClick={close}
+                    onClick={dismiss}
                     className="modal-close"
                 />
                 <span className="modal-icon">
@@ -1118,7 +1259,7 @@ function ModalView({
                             to the server. For extra assurance, compare a safety
                             code with each friend using another trusted channel.
                         </div>
-                        <button className="primary" onClick={close}>
+                        <button className="primary" onClick={dismiss}>
                             Sounds good <Icon name="check" size={18} />
                         </button>
                     </>
@@ -1176,8 +1317,16 @@ function ModalView({
 
 function App() {
     const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
+    const mobile = useMobileLayout();
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const [modal, setModal] = useState<Modal>(null);
     const [mobileNav, setMobileNav] = useState(false);
+    const navigation = useRef<HTMLElement>(null);
+    const dismissNavigation = useMobilePanel(
+        navigation,
+        () => setMobileNav(false),
+        { open: mobileNav, direction: 'left' }
+    );
     const [logoutOpen, setLogoutOpen] = useState(false);
     const [showMembers, setShowMembers] = useState(() => {
         try {
@@ -1201,9 +1350,13 @@ function App() {
     const menuOrigin = useRef<HTMLElement | null>(null);
     const selectionAnchor = useRef<string | null>(null);
     const deleting = useRef(new Set<string>());
-    const bottom = useRef<HTMLDivElement>(null);
     const scroll = useRef<HTMLDivElement>(null);
     const nearBottom = useRef(true);
+    useChatViewport(
+        mobile && (state.phase === 'online' || state.phase === 'reconnecting'),
+        scroll,
+        nearBottom
+    );
     useEffect(() => {
         if (
             dismissedCall &&
@@ -1241,7 +1394,7 @@ function App() {
             )
                 return;
             if (mobileNav) {
-                setMobileNav(false);
+                dismissNavigation();
                 event.preventDefault();
             } else if (
                 selectionMode &&
@@ -1258,7 +1411,15 @@ function App() {
         };
         document.addEventListener('keydown', escape);
         return () => document.removeEventListener('keydown', escape);
-    }, [mobileNav, selectionMode, actionDialog, menu, editing, modal]);
+    }, [
+        mobileNav,
+        selectionMode,
+        actionDialog,
+        menu,
+        editing,
+        modal,
+        dismissNavigation,
+    ]);
     useEffect(() => {
         setSelected((ids) => {
             const next = ids.filter((id) =>
@@ -1268,11 +1429,8 @@ function App() {
         });
     }, [state.messages]);
     useEffect(() => {
-        if (nearBottom.current)
-            bottom.current?.scrollIntoView({
-                behavior: 'instant',
-                block: 'end',
-            });
+        if (nearBottom.current && scroll.current)
+            scroll.current.scrollTop = scroll.current.scrollHeight;
     }, [state.messages.length, state.presence.length, state.scope]);
     if (state.phase === 'loading')
         return (
@@ -1387,8 +1545,8 @@ function App() {
                     document.activeElement === document.body
                 )
                     document
-                        .querySelector<HTMLTextAreaElement>(
-                            '.composer textarea'
+                        .querySelector<HTMLElement>(
+                            '.composer [role="textbox"]'
                         )
                         ?.focus({ preventScroll: true });
             })
@@ -1530,10 +1688,13 @@ function App() {
                 <button
                     className="nav-backdrop"
                     aria-label="Close navigation"
-                    onClick={() => setMobileNav(false)}
+                    onClick={dismissNavigation}
                 />
             )}
-            <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
+            <aside
+                ref={navigation}
+                className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}
+            >
                 <div className="space-heading">
                     <div>
                         <h1>
@@ -1708,31 +1869,71 @@ function App() {
                             }
                             onClick={() => void client.joinCall(state.scope)}
                         />
-                        <IconButton
-                            icon="video"
-                            label="Start video call"
-                            disabled={
-                                state.phase !== 'online' ||
-                                Boolean(recipient && !recipient.online)
-                            }
-                            onClick={() =>
-                                void client.joinCall(state.scope, true)
-                            }
-                        />
-                        <IconButton
-                            icon="search"
-                            label="Search this conversation"
-                            active={searchOpen}
-                            onClick={() => {
-                                setSearchOpen(!searchOpen);
-                                if (searchOpen) setSearch('');
-                            }}
-                        />
+                        {!mobile && (
+                            <>
+                                <IconButton
+                                    icon="video"
+                                    label="Start video call"
+                                    disabled={
+                                        state.phase !== 'online' ||
+                                        Boolean(recipient && !recipient.online)
+                                    }
+                                    onClick={() =>
+                                        void client.joinCall(state.scope, true)
+                                    }
+                                />
+                                <IconButton
+                                    icon="search"
+                                    label="Search this conversation"
+                                    active={searchOpen}
+                                    onClick={() => {
+                                        setSearchOpen(!searchOpen);
+                                        if (searchOpen) setSearch('');
+                                    }}
+                                />
+                            </>
+                        )}
                         <ConversationActions
                             client={client}
                             scope={state.scope}
                             title={title}
                             online={state.phase === 'online'}
+                            actions={
+                                mobile
+                                    ? [
+                                          {
+                                              label: 'Start video call',
+                                              icon: 'video',
+                                              disabled:
+                                                  state.phase !== 'online' ||
+                                                  Boolean(
+                                                      recipient &&
+                                                      !recipient.online
+                                                  ),
+                                              run: () =>
+                                                  void client.joinCall(
+                                                      state.scope,
+                                                      true
+                                                  ),
+                                          },
+                                          {
+                                              label: searchOpen
+                                                  ? 'Close search'
+                                                  : 'Search this conversation',
+                                              icon: 'search',
+                                              run: () => {
+                                                  setSearchOpen(!searchOpen);
+                                                  if (searchOpen) setSearch('');
+                                              },
+                                          },
+                                          {
+                                              label: 'Settings',
+                                              icon: 'settings',
+                                              run: () => setSettingsOpen(true),
+                                          },
+                                      ]
+                                    : []
+                            }
                             share={
                                 state.scope === 'room' && messages.length > 0
                                     ? () => {
@@ -1745,6 +1946,9 @@ function App() {
                             }
                         />
                         <AppearanceControls
+                            open={settingsOpen}
+                            onOpenChange={setSettingsOpen}
+                            hideControls={mobile}
                             call={state.call}
                             onScreenAudio={(enabled) =>
                                 void client.rtc?.setScreenAudio(enabled)
@@ -1825,8 +2029,8 @@ function App() {
                                     setSearchOpen(false);
                                     setSearch('');
                                     document
-                                        .querySelector<HTMLTextAreaElement>(
-                                            '.composer textarea'
+                                        .querySelector<HTMLElement>(
+                                            '.composer [role="textbox"]'
                                         )
                                         ?.focus();
                                 }
@@ -1910,8 +2114,8 @@ function App() {
                                     closeEditor={() => {
                                         setEditing(null);
                                         document
-                                            .querySelector<HTMLTextAreaElement>(
-                                                '.composer textarea'
+                                            .querySelector<HTMLElement>(
+                                                '.composer [role="textbox"]'
                                             )
                                             ?.focus();
                                     }}
@@ -1957,7 +2161,6 @@ function App() {
                             <small>Try another word or phrase.</small>
                         </div>
                     )}
-                    <div ref={bottom} />
                 </div>
                 {selectionMode && (
                     <div
@@ -2148,8 +2351,8 @@ function App() {
                                 id && actionDialog.ids.includes(id) ? null : id
                             );
                             document
-                                .querySelector<HTMLTextAreaElement>(
-                                    '.composer textarea'
+                                .querySelector<HTMLElement>(
+                                    '.composer [role="textbox"]'
                                 )
                                 ?.focus({ preventScroll: true });
                         }

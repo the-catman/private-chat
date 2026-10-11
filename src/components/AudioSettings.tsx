@@ -1,4 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 import {
     getAudioPreferences,
     setAudioPreferences,
@@ -137,6 +139,7 @@ export function AudioSettingsDialog({
     close: () => void;
 }) {
     const ref = useRef<HTMLDialogElement>(null);
+    const dismiss = useMobilePanel(ref, close);
     useEffect(() => {
         ref.current?.showModal();
     }, []);
@@ -145,16 +148,20 @@ export function AudioSettingsDialog({
             ref={ref}
             className="modal audio-settings"
             aria-labelledby="audio-title"
-            onCancel={close}
+            onCancel={(event) => {
+                event.preventDefault();
+                dismiss();
+            }}
             onClick={(event) => {
-                if (event.target === event.currentTarget) close();
+                if (event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <button
                     className="icon-button modal-close"
                     aria-label="Close audio settings"
-                    onClick={close}
+                    onClick={dismiss}
                 >
                     <Icon name="close" />
                 </button>
@@ -163,7 +170,7 @@ export function AudioSettingsDialog({
                     call={call}
                     onScreenAudio={onScreenAudio}
                 />
-                <button className="primary" onClick={close}>
+                <button className="primary" onClick={dismiss}>
                     Done <Icon name="check" size={18} />
                 </button>
             </div>

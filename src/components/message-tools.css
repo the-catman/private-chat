@@ -1,0 +1,216 @@
+.markdown,
+.message-input {
+    /* The bundled DM Sans has upright faces. Allow its italic synthesis. */
+    font-synthesis: style;
+}
+.composer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+}
+.composer-input-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+    width: 100%;
+}
+.message-input {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    font-size: 1rem;
+}
+.message-input .cm-editor {
+    background: transparent;
+    outline: none;
+}
+.message-input .cm-scroller {
+    font: inherit;
+    line-height: 1.55;
+    max-height: 160px;
+    overscroll-behavior: contain;
+}
+.message-input .cm-content {
+    padding: 3px 0;
+    min-height: 28px;
+    caret-color: var(--text);
+    user-select: text;
+    -webkit-user-select: text;
+}
+.message-input .cm-line {
+    padding: 0;
+    overflow-wrap: anywhere;
+}
+.message-input .cm-placeholder {
+    color: var(--muted);
+}
+.message-input [aria-disabled='true'] {
+    opacity: 0.65;
+}
+.message-input code {
+    font-family: ui-monospace, monospace;
+    background: var(--accent-soft);
+    border-radius: 4px;
+}
+.message-input .input-link {
+    color: var(--accent);
+    text-decoration: underline;
+}
+.message-input .input-heading {
+    font-weight: 650;
+}
+.message-input .input-code-line {
+    background: var(--accent-soft);
+    font-family: ui-monospace, monospace;
+    font-size: 0.875em;
+}
+.message-editor {
+    background: var(--panel-2);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 12px;
+    margin-top: 6px;
+}
+.message-editor .cm-content {
+    min-height: 48px;
+    padding: 8px 2px;
+}
+.message-editor .cm-scroller {
+    max-height: 220px;
+}
+.message-editor-actions {
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+}
+.composer-foot {
+    justify-content: flex-start;
+    gap: 18px;
+}
+.shortcut-help {
+    width: min(660px, calc(100% - 32px));
+}
+.shortcut-list {
+    display: grid;
+    margin: 20px 0;
+    text-align: left;
+}
+.shortcut-list > div {
+    display: grid;
+    grid-template-columns: 1fr 1.3fr;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.875rem;
+}
+.shortcut-list dd {
+    margin: 0;
+    color: var(--muted);
+}
+.shortcut-list kbd {
+    font: inherit;
+    font-weight: 550;
+}
+.file-attachment {
+    padding: 0;
+    gap: 0;
+}
+.file-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    text-align: left;
+    color: inherit;
+    text-decoration: none;
+    border-radius: inherit;
+}
+.file-open > span:nth-child(2) {
+    flex: 1;
+    min-width: 0;
+}
+.file-download {
+    flex-shrink: 0;
+    margin-right: 8px;
+    color: var(--accent);
+}
+.file-preview {
+    width: min(920px, calc(100% - 32px));
+}
+.file-preview-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+}
+.file-preview-header > div {
+    min-width: 0;
+    flex: 1;
+}
+.file-preview-header h2 {
+    margin: 0 0 4px;
+    font-size: 1rem;
+    overflow-wrap: anywhere;
+}
+.file-preview-header small {
+    color: var(--muted);
+}
+.file-preview-header .icon-button {
+    flex-shrink: 0;
+}
+.file-preview-body {
+    overflow: auto;
+    overscroll-behavior: contain;
+    max-height: 72dvh;
+    padding: 16px;
+}
+.image-preview {
+    display: block;
+    max-width: 100%;
+    max-height: 65dvh;
+    object-fit: contain;
+    margin: auto;
+}
+.text-file-preview {
+    margin: 0;
+    padding: 4px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+    text-align: left;
+    font:
+        0.875rem/1.65 ui-monospace,
+        monospace;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.pdf-page {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: auto;
+    background: white;
+}
+.pdf-page[hidden] {
+    display: none;
+}
+.pdf-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 0.8125rem;
+}
+.preview-status {
+    color: var(--muted);
+    font-size: 0.875rem;
+    text-align: center;
+    padding: 12px;
+}

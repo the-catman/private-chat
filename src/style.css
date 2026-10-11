@@ -1999,14 +1999,14 @@ kbd {
     font-size: 1rem;
     line-height: 1.6;
 }
-.message-editor > div {
+.message-editor-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
     margin-top: 8px;
 }
-.message-editor > div > span {
+.message-editor-actions > span {
     font-size: 0.75rem;
     color: var(--muted);
     margin-right: auto;
@@ -2509,7 +2509,7 @@ input:focus-visible {
     .message-meta {
         gap: 5px;
     }
-    .message-editor > div > span {
+    .message-editor-actions > span {
         flex-basis: 100%;
     }
     .login-page {

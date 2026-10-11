@@ -44,6 +44,13 @@ export async function createDevFrontend(
                 'react/jsx-dev-runtime',
                 'react-markdown',
                 'remark-gfm',
+                '@codemirror/commands',
+                '@codemirror/lang-markdown',
+                '@codemirror/language',
+                '@codemirror/state',
+                '@codemirror/view',
+                'pdfjs-dist',
+                'pdfjs-dist/build/pdf.worker.mjs',
             ],
         },
         server: {
@@ -94,7 +101,7 @@ export async function createDevFrontend(
         /^\/src\/(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_.-]+\.(tsx?|css)$/.test(
             path
         ) ||
-        /^\/\.vite\/deps\/[a-zA-Z0-9_.-]+\.js(?:\.map)?$/.test(path);
+        /^\/\.vite\/deps\/@?[a-zA-Z0-9_.-]+\.js(?:\.map)?$/.test(path);
     return {
         allows,
         upgradePath,

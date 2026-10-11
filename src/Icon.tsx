@@ -1,6 +1,12 @@
 import type { CSSProperties } from 'react';
 
 const paths: Record<string, React.ReactNode> = {
+    keyboard: (
+        <>
+            <rect x="2" y="5" width="20" height="14" rx="3" />
+            <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 15h10" />
+        </>
+    ),
     markdown: (
         <>
             <rect x="2" y="5" width="20" height="14" rx="3" />

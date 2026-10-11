@@ -2,6 +2,10 @@
 
 The files in `src/assets/fonts/` are bundled locally. No font or emoji requests are sent to an external service. All three font files are preloaded independently of conversation contents.
 
+## PDF previews
+
+PDF previews use [Mozilla PDF.js](https://mozilla.github.io/pdf.js/) (`pdfjs-dist` 6.4.299), under the Apache License 2.0. The original license is in [licenses/PDFjs.txt](licenses/PDFjs.txt). Its renderer and worker are bundled locally; attachment bytes are processed in browser memory. Hush does not include the PDF.js viewer or execute document scripts.
+
 ## DM Sans
 
 DM Sans by the DM Sans Project Authors / Colophon Foundry, distributed under the SIL Open Font License 1.1. The original license and copyright notice are in [licenses/DM-Sans.txt](licenses/DM-Sans.txt).
@@ -31,3 +35,5 @@ Hush adds worklet initialization/error notifications and starts its control mess
 ## Markdown
 
 Messages use the MIT-licensed `react-markdown` and `remark-gfm` packages. Markdown parsing and rendering happen locally; no message contents are sent to another service. Original package notices are in [licenses/Markdown.txt](licenses/Markdown.txt).
+
+The live message editor uses [CodeMirror](https://codemirror.net/) and Lezer, by Marijn Haverbeke and contributors, under the MIT license. The editor and its dependencies are bundled locally. Their notices are in [licenses/CodeMirror.txt](licenses/CodeMirror.txt).

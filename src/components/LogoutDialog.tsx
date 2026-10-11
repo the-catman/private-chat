@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 
 export function LogoutDialog({
     inCall,
@@ -12,6 +14,7 @@ export function LogoutDialog({
     const dialog = useRef<HTMLDialogElement>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const dismiss = useMobilePanel(dialog, close, { blocked: busy });
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
@@ -34,13 +37,14 @@ export function LogoutDialog({
             aria-describedby="logout-description"
             aria-busy={busy}
             onCancel={(event) => {
-                if (busy) event.preventDefault();
-                else close();
+                event.preventDefault();
+                dismiss();
             }}
             onClick={(event) => {
-                if (!busy && event.target === event.currentTarget) close();
+                if (event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <h2 id="logout-title">Log out of this space?</h2>
                 <p id="logout-description">
@@ -57,7 +61,7 @@ export function LogoutDialog({
                         className="subtle-button"
                         autoFocus
                         disabled={busy}
-                        onClick={close}
+                        onClick={dismiss}
                     >
                         Cancel
                     </button>

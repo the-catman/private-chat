@@ -10,6 +10,13 @@ export default defineConfig({
                 manualChunks: {
                     'emoji-data': ['./src/lib/emoji-data.ts'],
                     markdown: ['react-markdown', 'remark-gfm'],
+                    'message-editor': [
+                        '@codemirror/commands',
+                        '@codemirror/lang-markdown',
+                        '@codemirror/language',
+                        '@codemirror/state',
+                        '@codemirror/view',
+                    ],
                 },
             },
         },

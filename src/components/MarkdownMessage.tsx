@@ -2,6 +2,8 @@ import { memo, useEffect, useRef } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Icon } from '../Icon';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 
 const plugins = [remarkGfm];
 // No raw HTML, remote images, or executable URLs. Rendering never fetches content.
@@ -63,6 +65,7 @@ const examples = [
 
 export function MarkdownHelp({ close }: { close: () => void }) {
     const dialog = useRef<HTMLDialogElement>(null);
+    const dismiss = useMobilePanel(dialog, close);
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
@@ -71,25 +74,26 @@ export function MarkdownHelp({ close }: { close: () => void }) {
             ref={dialog}
             className="modal markdown-help"
             aria-labelledby="markdown-title"
-            onCancel={close}
+            onCancel={(event) => {
+                event.preventDefault();
+                dismiss();
+            }}
             onClick={(event) => {
-                if (event.target === event.currentTarget) close();
+                if (event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <button
                     className="modal-close icon-button"
                     aria-label="Close formatting help"
-                    onClick={close}
+                    onClick={dismiss}
                     autoFocus
                 >
                     <Icon name="close" />
                 </button>
                 <h2 id="markdown-title">Format your messages</h2>
-                <p>
-                    Type Markdown in your message. Here’s how it looks when you
-                    send it.
-                </p>
+                <p>Type Markdown to format your message as you write.</p>
                 <div className="markdown-examples">
                     {examples.map(([name, example]) => (
                         <div className="markdown-example" key={name}>
@@ -99,7 +103,7 @@ export function MarkdownHelp({ close }: { close: () => void }) {
                         </div>
                     ))}
                 </div>
-                <button className="primary" onClick={close}>
+                <button className="primary" onClick={dismiss}>
                     Got it
                 </button>
             </div>

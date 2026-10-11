@@ -2,43 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatState, Message } from '../types';
 import type { ChatClient } from '../lib/client';
 import { Icon } from '../Icon';
-import { fileSize } from '../lib/content';
-import { unb64 } from '../lib/crypto';
-
-export function FileAttachment({
-    content,
-}: {
-    content: Extract<Message['payload'], { kind: 'file' }>;
-}) {
-    const [url, setUrl] = useState('');
-    useEffect(() => {
-        // Always download attachments. Never execute or embed untrusted HTML/SVG.
-        const value = URL.createObjectURL(
-            new Blob([unb64(content.data)], {
-                type: 'application/octet-stream',
-            })
-        );
-        setUrl(value);
-        return () => URL.revokeObjectURL(value);
-    }, [content.data]);
-    return (
-        <a
-            className="file-attachment"
-            href={url || undefined}
-            download={content.name.replace(/[\\/\u0000-\u001f\u007f]/g, '_')}
-            aria-label={`Download ${content.name}`}
-        >
-            <span className="file-icon">
-                <Icon name="file" size={24} />
-            </span>
-            <span>
-                <strong>{content.name}</strong>
-                <small>{fileSize(content.size)}</small>
-            </span>
-            <Icon name="download" size={19} />
-        </a>
-    );
-}
+import { MessageInput, type MessageInputHandle } from './MessageInput';
+import { useMobileLayout } from './useMobileLayout';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 
 export type MenuAction = {
     label: string;
@@ -61,41 +28,61 @@ export function MessageMenu({
     close: () => void;
     label?: string;
 }) {
+    const mobile = useMobileLayout();
     const ref = useRef<HTMLDivElement>(null);
+    const dialog = useRef<HTMLDialogElement>(null);
     const closeRef = useRef(close);
     closeRef.current = close;
+    const dismissMenu = () => {
+        dialog.current?.close();
+        closeRef.current();
+    };
+    const dismissAnimated = useMobilePanel(dialog, () => closeRef.current(), {
+        open: mobile,
+    });
     useLayoutEffect(() => {
         const menu = ref.current!;
-        const box = menu.getBoundingClientRect();
-        menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - box.width - 8))}px`;
-        menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - box.height - 8))}px`;
-        menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
-    }, [x, y]);
+        if (mobile) dialog.current?.showModal();
+        else {
+            const box = menu.getBoundingClientRect();
+            menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - box.width - 8))}px`;
+            menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - box.height - 8))}px`;
+        }
+        menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({
+            preventScroll: true,
+        });
+    }, [x, y, mobile]);
     useEffect(() => {
         const dismiss = (event: PointerEvent) => {
-            if (!ref.current?.contains(event.target as Node))
-                closeRef.current();
+            const boundary = mobile ? dialog.current : ref.current;
+            if (!boundary?.contains(event.target as Node)) closeRef.current();
         };
-        const resize = () => closeRef.current();
+        // Closing a phone keyboard can resize the viewport as a sheet opens.
+        const resize = () => {
+            if (!mobile) closeRef.current();
+        };
         document.addEventListener('pointerdown', dismiss);
         window.addEventListener('resize', resize);
         return () => {
             document.removeEventListener('pointerdown', dismiss);
             window.removeEventListener('resize', resize);
         };
-    }, []);
-    return (
+    }, [mobile]);
+    const menu = (
         <div
             ref={ref}
             className="message-menu"
             role="menu"
             aria-label={label}
-            style={{ left: x, top: y }}
+            style={mobile ? undefined : { left: x, top: y }}
             onContextMenu={(event) => event.preventDefault()}
             onKeyDown={(event) => {
-                if (event.key === 'Escape' || event.key === 'Tab') {
+                if (
+                    event.key === 'Escape' ||
+                    (!mobile && event.key === 'Tab')
+                ) {
                     event.preventDefault();
-                    close();
+                    dismissAnimated();
                     return;
                 }
                 const buttons = [
@@ -131,7 +118,7 @@ export function MessageMenu({
                     disabled={action.disabled}
                     title={action.hint}
                     onClick={() => {
-                        close();
+                        dismissMenu();
                         action.run();
                     }}
                 >
@@ -140,6 +127,35 @@ export function MessageMenu({
                 </button>
             ))}
         </div>
+    );
+    return mobile ? (
+        <dialog
+            ref={dialog}
+            className="action-sheet"
+            aria-label={label}
+            onCancel={(event) => {
+                event.preventDefault();
+                dismissAnimated();
+            }}
+            onClick={(event) => {
+                if (event.target === event.currentTarget) dismissAnimated();
+            }}
+        >
+            <SheetHandle />
+            <div className="action-sheet-heading" data-panel-handle>
+                <strong>{label}</strong>
+                <button
+                    className="icon-button"
+                    aria-label="Close actions"
+                    onClick={dismissAnimated}
+                >
+                    <Icon name="close" />
+                </button>
+            </div>
+            {menu}
+        </dialog>
+    ) : (
+        menu
     );
 }
 
@@ -159,9 +175,20 @@ export function MessageEditor({
     );
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
-    const input = useRef<HTMLTextAreaElement>(null);
+    const input = useRef<MessageInputHandle>(null);
+    const mobile = useMobileLayout();
+    useLayoutEffect(() => {
+        const node = input.current;
+        if (!node) return;
+        node.focus({ preventScroll: true });
+        node.setSelectionRange(node.value.length, node.value.length);
+    }, []);
     const save = async () => {
         if (busy) return;
+        if (message.payload.kind === 'text' && text === message.payload.text) {
+            close();
+            return;
+        }
         if (!text.trim()) {
             setError('');
             input.current?.focus({ preventScroll: true });
@@ -185,15 +212,21 @@ export function MessageEditor({
     };
     return (
         <div className="message-editor">
-            <textarea
+            <MessageInput
                 ref={input}
-                aria-label="Edit message"
-                autoFocus
+                label="Edit message"
+                enterKeyHint={mobile ? 'enter' : 'done'}
                 value={text}
-                maxLength={4000}
                 disabled={busy}
-                onChange={(event) => setText(event.target.value)}
+                onLimit={() =>
+                    setError('Messages can be up to 4,000 characters.')
+                }
+                onChange={(value) => {
+                    setText(value);
+                    setError('');
+                }}
                 onKeyDown={(event) => {
+                    if (event.isComposing || busy) return;
                     if (event.key === 'Escape') {
                         event.preventDefault();
                         close();
@@ -201,7 +234,10 @@ export function MessageEditor({
                     if (
                         event.key === 'Enter' &&
                         !event.shiftKey &&
-                        !event.nativeEvent.isComposing
+                        (!mobile ||
+                            !window.matchMedia('(pointer: coarse)').matches ||
+                            event.ctrlKey ||
+                            event.metaKey)
                     ) {
                         event.preventDefault();
                         void save();
@@ -213,8 +249,12 @@ export function MessageEditor({
                     {error}
                 </p>
             )}
-            <div>
-                <span>Enter to save · Esc to cancel</span>
+            <div className="message-editor-actions">
+                <span>
+                    {mobile
+                        ? 'Return for a new line'
+                        : 'Enter to save · Shift+Enter for a new line · Esc to cancel'}
+                </span>
                 <button
                     className="subtle-button"
                     disabled={busy}
@@ -264,10 +304,7 @@ export function MessageActionDialog({
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
-    const dismiss = () => {
-        dialog.current?.close();
-        close();
-    };
+    const dismiss = useMobilePanel(dialog, close, { blocked: busy });
     const sharing = action.type === 'share';
     const missing = messages.length !== action.ids.length;
     const newMessages = messages.filter((m) => !m.audience.includes(target));
@@ -310,6 +347,7 @@ export function MessageActionDialog({
                 if (!busy && event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <button
                     className="icon-button modal-close"

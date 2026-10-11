@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../Icon';
 import { AudioSettingsFields } from './AudioSettings';
 import type { CallState } from '../types';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 
 type Theme = 'dark' | 'light';
 type Size = 'compact' | 'comfortable' | 'large';
@@ -35,19 +37,28 @@ export function AppearanceControls({
     onVerify,
     call,
     onScreenAudio,
+    open: controlledOpen,
+    onOpenChange,
+    hideControls = false,
 }: {
     onPrivacy?: () => void;
     onVerify?: () => void;
     call?: CallState | null;
     onScreenAudio?: (enabled: boolean) => void;
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
+    hideControls?: boolean;
 }) {
     const [current, setCurrent] = useState(theme);
     const [size, setSize] = useState(textSize);
-    const [open, setOpen] = useState(false);
+    const [internalOpen, setInternalOpen] = useState(false);
+    const open = controlledOpen ?? internalOpen;
+    const setOpen = onOpenChange ?? setInternalOpen;
     const [section, setSection] = useState<'appearance' | 'audio'>(
         'appearance'
     );
     const dialog = useRef<HTMLDialogElement>(null);
+    const dismiss = useMobilePanel(dialog, () => setOpen(false), { open });
     useEffect(() => {
         if (open) dialog.current?.showModal();
     }, [open]);
@@ -64,40 +75,47 @@ export function AppearanceControls({
     };
     return (
         <div className="appearance-controls">
-            <button
-                className="icon-button"
-                aria-label={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
-                title={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
-                onClick={() =>
-                    change(current === 'dark' ? 'light' : 'dark', size)
-                }
-            >
-                <Icon name={current === 'dark' ? 'sun' : 'moon'} />
-            </button>
-            <button
-                className="icon-button"
-                aria-label="Settings"
-                title="Settings"
-                onClick={() => setOpen(true)}
-            >
-                <Icon name="settings" />
-            </button>
+            {!hideControls && (
+                <>
+                    <button
+                        className="icon-button"
+                        aria-label={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
+                        title={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
+                        onClick={() =>
+                            change(current === 'dark' ? 'light' : 'dark', size)
+                        }
+                    >
+                        <Icon name={current === 'dark' ? 'sun' : 'moon'} />
+                    </button>
+                    <button
+                        className="icon-button"
+                        aria-label="Settings"
+                        title="Settings"
+                        onClick={() => setOpen(true)}
+                    >
+                        <Icon name="settings" />
+                    </button>
+                </>
+            )}
             {open && (
                 <dialog
                     className="modal"
                     ref={dialog}
                     aria-labelledby="appearance-title"
-                    onCancel={() => setOpen(false)}
+                    onCancel={(event) => {
+                        event.preventDefault();
+                        dismiss();
+                    }}
                     onClick={(event) => {
-                        if (event.target === event.currentTarget)
-                            setOpen(false);
+                        if (event.target === event.currentTarget) dismiss();
                     }}
                 >
+                    <SheetHandle />
                     <div className="modal-content">
                         <button
                             className="icon-button modal-close"
                             aria-label="Close settings"
-                            onClick={() => setOpen(false)}
+                            onClick={dismiss}
                         >
                             <Icon name="close" />
                         </button>
@@ -223,7 +241,6 @@ export function AppearanceControls({
                                     <button
                                         className="settings-link"
                                         onClick={() => {
-                                            setOpen(false);
                                             onPrivacy();
                                         }}
                                     >
@@ -236,7 +253,6 @@ export function AppearanceControls({
                                     <button
                                         className="settings-link"
                                         onClick={() => {
-                                            setOpen(false);
                                             onVerify();
                                         }}
                                     >
@@ -247,10 +263,7 @@ export function AppearanceControls({
                                 )}
                             </div>
                         )}
-                        <button
-                            className="primary"
-                            onClick={() => setOpen(false)}
-                        >
+                        <button className="primary" onClick={dismiss}>
                             Done <Icon name="check" size={18} />
                         </button>
                         <details className="appearance-credits">

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatClient } from '../lib/client';
 import { Icon } from '../Icon';
-import { MessageMenu } from './MessageActions';
+import { MessageMenu, type MenuAction } from './MessageActions';
+import { useMobilePanel } from './useMobilePanel';
+import { SheetHandle } from './SheetHandle';
 
 export function ConversationActions({
     client,
@@ -9,12 +11,14 @@ export function ConversationActions({
     title,
     online,
     share,
+    actions = [],
 }: {
     client: ChatClient;
     scope: string;
     title: string;
     online: boolean;
     share?: () => void;
+    actions?: MenuAction[];
 }) {
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
     const [clear, setClear] = useState<{ scope: string; title: string } | null>(
@@ -51,6 +55,7 @@ export function ConversationActions({
                     label="Conversation actions"
                     close={closeMenu}
                     actions={[
+                        ...actions,
                         ...(share
                             ? [
                                   {
@@ -97,6 +102,7 @@ function ClearConversationDialog({
     const dialog = useRef<HTMLDialogElement>(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    const dismiss = useMobilePanel(dialog, close, { blocked: busy });
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
@@ -123,13 +129,14 @@ function ClearConversationDialog({
             aria-describedby="clear-chat-description"
             aria-busy={busy}
             onCancel={(event) => {
-                if (busy) event.preventDefault();
-                else close();
+                event.preventDefault();
+                dismiss();
             }}
             onClick={(event) => {
-                if (!busy && event.target === event.currentTarget) close();
+                if (event.target === event.currentTarget) dismiss();
             }}
         >
+            <SheetHandle />
             <div className="modal-content">
                 <h2 id="clear-chat-title">Clear chat for everyone?</h2>
                 <p id="clear-chat-description">
@@ -146,7 +153,7 @@ function ClearConversationDialog({
                         className="subtle-button"
                         autoFocus
                         disabled={busy}
-                        onClick={close}
+                        onClick={dismiss}
                     >
                         Cancel
                     </button>

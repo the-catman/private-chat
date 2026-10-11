@@ -1,3 +1,4 @@
+import { expectInput } from './message-input';
 import assert from 'node:assert/strict';
 import { expect, type Page, type BrowserContext } from '@playwright/test';
 
@@ -16,10 +17,9 @@ async function holdComposerSend(page: Page, text: string, fail = false) {
     await page.evaluate(
         ({ text, fail }) => {
             const encrypt = crypto.subtle.encrypt;
-            const editor =
-                document.querySelector<HTMLTextAreaElement>(
-                    '.composer textarea'
-                )!;
+            const editor = document.querySelector<HTMLElement>(
+                '.composer [role="textbox"]'
+            )!;
             let release!: () => void;
             const pending = new Promise<void>((resolve) => {
                 release = resolve;
@@ -58,7 +58,7 @@ async function holdComposerSend(page: Page, text: string, fail = false) {
 }
 
 export async function checkComposerFocus(page: Page) {
-    const composer = page.locator('.composer textarea');
+    const composer = page.locator('.composer [role="textbox"]');
     const sendButton = page.getByRole('button', {
         name: 'Send message',
         exact: true,
@@ -101,7 +101,7 @@ export async function checkComposerFocus(page: Page) {
                 )
                 .toBe(true);
             await expect(composer).toBeEditable();
-            await expect(composer).toHaveValue('');
+            await expectInput(composer, '');
             await expect(composer).toBeFocused();
             assert.equal(
                 await page
@@ -120,7 +120,7 @@ export async function checkComposerFocus(page: Page) {
             await page.evaluate(() => window.__composerSendTest?.release());
             await expect(page.getByText(text, { exact: true })).toBeVisible();
             await expect(sendButton).toBeEnabled();
-            await expect(composer).toHaveValue('The next message');
+            await expectInput(composer, 'The next message');
             await expect(composer).toBeFocused();
             assert.equal(
                 await page.evaluate(() => window.__composerSendTest?.blurs),
@@ -139,7 +139,7 @@ export async function checkComposerFocus(page: Page) {
             await composer.fill(text);
             await holdComposerSend(page, text, true);
             await page.keyboard.press('Enter');
-            await expect(composer).toHaveValue('');
+            await expectInput(composer, '');
             if (nextDraft) await page.keyboard.type(nextDraft);
             // Completing a send must not pull focus away from another control.
             const help = page.getByRole('button', {
@@ -152,7 +152,8 @@ export async function checkComposerFocus(page: Page) {
                 'Synthetic send failure'
             );
             await expect(sendButton).toBeEnabled();
-            await expect(composer).toHaveValue(
+            await expectInput(
+                composer,
                 nextDraft ? `${text}\n${nextDraft}` : text
             );
             await expect(help).toBeFocused();
@@ -292,11 +293,11 @@ export async function checkPopoutVolume(popup: Page, parent: Page) {
 }
 
 async function send(page: Page, text: string) {
-    await page.locator('.composer textarea').fill(text);
+    await page.locator('.composer [role="textbox"]').fill(text);
     await page
         .getByRole('button', { name: 'Send message', exact: true })
         .click();
-    await expect(page.locator('.composer textarea')).toHaveValue('');
+    await expectInput(page.locator('.composer [role="textbox"]'), '');
 }
 
 export async function checkMarkdown(alice: Page, bob: Page) {
@@ -331,7 +332,7 @@ export async function checkMarkdown(alice: Page, bob: Page) {
     await helper.screenshot({ path: 'test-results/markdown-helper.png' });
     await alice.keyboard.press('Escape');
     await expect(helper).toHaveCount(0);
-    await expect(alice.locator('.composer textarea')).toBeFocused();
+    await expect(alice.locator('.composer [role="textbox"]')).toBeFocused();
     const text =
         '**A formatted message** with *emphasis* and ~~old words~~.\n\n> A quoted line\n\n- first\n- second\n\n```ts\nconst greeting = "hello";\n```\n\n[Example](https://example.com)';
     await send(alice, text);
@@ -371,9 +372,14 @@ export async function checkMarkdown(alice: Page, bob: Page) {
     await alice
         .getByRole('menuitem', { name: 'Edit message', exact: true })
         .click();
-    await expect(
-        alice.getByRole('textbox', { name: 'Edit message', exact: true })
-    ).toHaveValue(text);
+    const formattedEditor = alice.getByRole('textbox', {
+        name: 'Edit message',
+        exact: true,
+    });
+    await expect(formattedEditor.locator('strong')).toHaveText(
+        'A formatted message'
+    );
+    await expect(formattedEditor.locator('em')).toHaveText('emphasis');
     await alice.keyboard.press('Escape');
     await send(
         alice,

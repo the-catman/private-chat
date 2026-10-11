@@ -1,5 +1,12 @@
+import { expectInput } from './message-input';
 import assert from 'node:assert/strict';
-import { chromium, expect, type Page } from '@playwright/test';
+import {
+    chromium,
+    webkit,
+    expect,
+    type Page,
+    type BrowserContextOptions,
+} from '@playwright/test';
 import { createServer } from 'node:https';
 import { once } from 'node:events';
 import {
@@ -22,6 +29,8 @@ import { createDevFrontend } from '../server/frontend';
 import NodeWebSocket from 'ws';
 import { observeSpeaking, checkSpeaking } from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
+import { checkMobileLayout } from './mobile-checks';
+import { checkUiChanges, checkPanelGestures } from './ui-checks';
 import {
     checkParticipantVolume,
     checkMarkdown,
@@ -111,22 +120,27 @@ app = createChatServer(config, {
     frontend: devRoot ? await createDevFrontend(config, devRoot) : undefined,
 });
 
-const browser = await chromium.launch({
+const browserType = process.env.TEST_BROWSER === 'webkit' ? webkit : chromium;
+const browser = await browserType.launch({
     headless: true,
-    args: [
-        '--use-fake-device-for-media-stream',
-        '--use-fake-ui-for-media-stream',
-        '--auto-select-desktop-capture-source=Entire screen',
-        '--enable-usermedia-screen-capturing',
-    ],
+    args:
+        browserType === chromium
+            ? [
+                  '--use-fake-device-for-media-stream',
+                  '--use-fake-ui-for-media-stream',
+                  '--auto-select-desktop-capture-source=Entire screen',
+                  '--enable-usermedia-screen-capturing',
+              ]
+            : [],
 });
 const errors: string[] = [];
 await mkdir('test-results', { recursive: true });
-async function participant(name: string) {
+async function participant(name: string, options: BrowserContextOptions = {}) {
     const context = await browser.newContext({
         ignoreHTTPSErrors: true,
-        permissions: ['microphone', 'camera'],
+        permissions: browserType === chromium ? ['microphone', 'camera'] : [],
         viewport: { width: 1440, height: 950 },
+        ...options,
     });
     await observeAudio(context);
     await observeSpeaking(context);
@@ -188,18 +202,40 @@ async function participant(name: string) {
     return { context, page };
 }
 async function message(page: Page, text: string) {
-    await page.locator('.composer textarea').fill(text);
+    await page.locator('.composer [role="textbox"]').fill(text);
     await page
         .getByRole('button', { name: 'Send message', exact: true })
         .click();
     await expect(page.getByText(text, { exact: true })).toBeVisible();
-    await expect(page.locator('.composer textarea')).toBeFocused();
+    await expect(page.locator('.composer [role="textbox"]')).toBeFocused();
 }
 
 async function run() {
     const alice = await participant('Alice');
     const bob = await participant('Bob');
     const charlie = await participant('Charlie');
+    if (process.env.TEST_UI === '1') {
+        await checkUiChanges(alice.page, bob.page);
+        const mobile = await participant('Mobile', {
+            viewport: { width: 390, height: 844 },
+            isMobile: true,
+            hasTouch: true,
+        });
+        await checkUiChanges(mobile.page, alice.page, true);
+        await checkPanelGestures(mobile.page);
+        assert.deepEqual(errors, []);
+        return;
+    }
+    if (process.env.TEST_MOBILE === '1') {
+        const mobile = await participant('Mobile', {
+            viewport: { width: 390, height: 844 },
+            isMobile: true,
+            hasTouch: true,
+        });
+        await checkMobileLayout(mobile.page, alice.page, true);
+        assert.deepEqual(errors, []);
+        return;
+    }
     if (process.env.TEST_COMPOSER === '1') {
         await checkComposerFocus(alice.page);
         assert.deepEqual(errors, []);
@@ -426,6 +462,8 @@ async function run() {
     );
     await alice.page.getByRole('button', { name: 'Close dialog' }).click();
     await bob.page.getByRole('button', { name: 'Close dialog' }).click();
+    await alice.page.getByRole('button', { name: 'Done', exact: true }).click();
+    await bob.page.getByRole('button', { name: 'Done', exact: true }).click();
     await bob.page.reload();
     await expect(
         bob.page.getByRole('heading', { name: 'The living room', exact: true })
@@ -607,26 +645,28 @@ async function run() {
             'edited'
         );
     }
-    await alice.page.locator('.composer textarea').fill(':smi');
+    await alice.page.locator('.composer [role="textbox"]').fill(':smi');
     await expect(
         alice.page.getByRole('listbox', { name: 'Emoji suggestions' })
     ).toBeVisible();
     await alice.page.getByRole('option', { name: /:smile:$/ }).click();
-    await expect(alice.page.locator('.composer textarea')).toHaveValue('😄 ');
+    await expectInput(alice.page.locator('.composer [role="textbox"]'), '😄 ');
     await alice.page
-        .locator('.composer textarea')
+        .locator('.composer [role="textbox"]')
         .fill('Hello :wave: :purple_heart: :not_an_emoji:');
-    await alice.page.locator('.composer textarea').press('Enter');
+    await alice.page.locator('.composer [role="textbox"]').press('Enter');
     await expect(row(bob.page, 'Hello 👋 💜 :not_an_emoji:')).toBeVisible();
-    await alice.page.locator('.composer textarea').press('ArrowUp');
+    await alice.page.locator('.composer [role="textbox"]').press('ArrowUp');
     await expect(
         alice.page.getByRole('textbox', { name: 'Edit message', exact: true })
     ).toBeVisible();
     await alice.page
         .getByRole('textbox', { name: 'Edit message', exact: true })
         .press('Escape');
-    await expect(alice.page.locator('.composer textarea')).toBeFocused();
-    const composer = alice.page.locator('.composer textarea');
+    await expect(
+        alice.page.locator('.composer [role="textbox"]')
+    ).toBeFocused();
+    const composer = alice.page.locator('.composer [role="textbox"]');
     const emojiButton = alice.page.getByRole('button', {
         name: 'Add emoji',
         exact: true,
@@ -647,9 +687,9 @@ async function run() {
     await emojiButton.click();
     await expect(picker).toHaveCount(0);
     await composer.fill('Hello there');
-    await composer.evaluate((element: HTMLTextAreaElement) =>
-        element.setSelectionRange(6, 11)
-    );
+    await composer.press('Home');
+    for (let i = 0; i < 6; i++) await composer.press('ArrowRight');
+    await composer.press('Control+Shift+End');
     await emojiButton.click();
     await alice.page
         .getByRole('textbox', { name: 'Search emojis', exact: true })
@@ -657,7 +697,7 @@ async function run() {
     await alice.page
         .getByRole('button', { name: 'Insert :wave:', exact: true })
         .click();
-    await expect(composer).toHaveValue('Hello 👋');
+    await expectInput(composer, 'Hello 👋');
     await expect(composer).toBeFocused();
     await composer.fill('');
     await emojiButton.click();
@@ -686,25 +726,25 @@ async function run() {
         picker.getByRole('button', { name: 'Insert :lebanon:', exact: true })
     ).toBeFocused();
     await alice.page.keyboard.press('Enter');
-    await expect(composer).toHaveValue('🇱🇧');
+    await expectInput(composer, '🇱🇧');
     await expect(composer).toBeFocused();
     await emojiButton.click();
     await search.fill(':wave_tone3:');
     await search.press('Enter');
-    await expect(composer).toHaveValue('🇱🇧👋🏽');
+    await expectInput(composer, '🇱🇧👋🏽');
     await expect(composer).toBeFocused();
     await emojiButton.click();
     await search.fill('distorted face');
     await picker
         .getByRole('button', { name: 'Insert :distorted_face:', exact: true })
         .click();
-    await expect(composer).toHaveValue('🇱🇧👋🏽🫪');
+    await expectInput(composer, '🇱🇧👋🏽🫪');
     await expect(composer).toBeFocused();
     await composer.fill(':handshake_tone1-3');
     await alice.page
         .getByRole('option', { name: /:handshake_tone1-3:$/ })
         .click();
-    await expect(composer).toHaveValue('🫱🏻‍🫲🏽 ');
+    await expectInput(composer, '🫱🏻‍🫲🏽 ');
     await expect(composer).toBeFocused();
     await composer.fill('');
     await emojiButton.click();
@@ -750,6 +790,13 @@ async function run() {
         alice.page.getByRole('heading', { name: 'Private by design.' })
     ).toBeVisible();
     await alice.page.keyboard.press('Escape');
+    await expect(
+        alice.page.getByRole('dialog', {
+            name: 'Make yourself comfortable.',
+            exact: true,
+        })
+    ).toBeVisible();
+    await alice.page.getByRole('button', { name: 'Done', exact: true }).click();
     await alice.page
         .getByRole('button', { name: 'Conversation actions', exact: true })
         .click();
@@ -985,7 +1032,7 @@ async function run() {
         .getByRole('dialog', { name: 'Emoji picker', exact: true })
         .screenshot({ path: 'test-results/emoji-picker-light.png' });
     await alice.page.keyboard.press('Escape');
-    await alice.page.locator('.composer textarea').click();
+    await alice.page.locator('.composer [role="textbox"]').click();
     await alice.page
         .locator('.composer')
         .screenshot({ path: 'test-results/composer-focused.png' });
@@ -1017,25 +1064,32 @@ async function run() {
         );
         await chatText.scrollIntoViewIfNeeded();
         await chatText.click({ button: 'right', position: { x: 5, y: 5 } });
-        const box = await alice.page
-            .getByRole('menu', { name: 'Message actions', exact: true })
-            .boundingBox();
-        assert.ok(
-            box &&
-                box.x >= 0 &&
-                box.y >= 0 &&
-                box.x + box.width <= viewport.width &&
-                box.y + box.height <= viewport.height
-        );
+        await expect
+            .poll(async () => {
+                const box = await alice.page
+                    .getByRole('menu', { name: 'Message actions', exact: true })
+                    .boundingBox();
+                return Boolean(
+                    box &&
+                    box.x >= 0 &&
+                    box.y >= 0 &&
+                    box.x + box.width <= viewport.width &&
+                    box.y + box.height <= viewport.height
+                );
+            })
+            .toBe(true);
         await alice.page.keyboard.press('Escape');
         await expect(
             alice.page.getByRole('button', {
-                name: 'Send message',
+                name: 'Message options',
                 exact: true,
             })
         ).toBeVisible();
         await alice.page
-            .getByRole('button', { name: 'Add emoji', exact: true })
+            .getByRole('button', { name: 'Message options', exact: true })
+            .click();
+        await alice.page
+            .getByRole('menuitem', { name: 'Add emoji', exact: true })
             .click();
         const emojiBox = await alice.page
             .getByRole('dialog', { name: 'Emoji picker', exact: true })
@@ -1052,6 +1106,7 @@ async function run() {
     await alice.page.screenshot({
         path: 'test-results/light-mobile-large-text.png',
     });
+    await alice.page.setViewportSize({ width: 1440, height: 950 });
     await alice.page
         .getByRole('button', { name: 'Switch to dark mode', exact: true })
         .click();
@@ -1073,6 +1128,10 @@ async function run() {
     await checkComposerFocus(alice.page);
 
     await checkMessageShortcuts(alice.page, bob.page);
+
+    await checkUiChanges(alice.page, bob.page);
+    await checkMobileLayout(alice.page, bob.page);
+    await checkPanelGestures(alice.page);
 
     await alice.page.setViewportSize({ width: 390, height: 844 });
     await expect(

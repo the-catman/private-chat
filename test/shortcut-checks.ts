@@ -1,3 +1,4 @@
+import { expectInput } from './message-input';
 import { expect, type Page } from '@playwright/test';
 
 const row = (page: Page, text: string) =>
@@ -6,7 +7,7 @@ const row = (page: Page, text: string) =>
     });
 
 async function send(page: Page, text: string, displayed = text) {
-    await page.locator('.composer textarea').fill(text);
+    await page.locator('.composer [role="textbox"]').fill(text);
     await page.keyboard.press('Enter');
     await expect(
         row(page, displayed).locator('.message-delivery')
@@ -19,7 +20,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
             .locator('.channel-row')
             .filter({ hasText: 'The living room' })
             .click();
-    const composer = alice.locator('.composer textarea');
+    const composer = alice.locator('.composer [role="textbox"]');
     const editor = alice.getByRole('textbox', {
         name: 'Edit message',
         exact: true,
@@ -35,14 +36,14 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
     await composer.fill('Keep my unfinished draft');
     await composer.press('ArrowUp');
     await expect(editor).toHaveCount(0);
-    await expect(composer).toHaveValue('Keep my unfinished draft');
+    await expectInput(composer, 'Keep my unfinished draft');
     await composer.fill('');
     await composer.press('Control+ArrowUp');
     await composer.press('Shift+ArrowUp');
     await expect(editor).toHaveCount(0);
     await composer.press('ArrowUp');
     await expect(editor).toBeFocused();
-    await expect(editor).toHaveValue('The latest shortcut message.');
+    await expectInput(editor, 'The latest shortcut message.');
     await editor.fill('The latest shortcut message, edited.');
     await editor.press('Enter');
     await expect(
@@ -54,7 +55,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
         button: 'right',
         modifiers: ['Control'],
     });
-    await expect(editor).toHaveValue('An older shortcut message.');
+    await expectInput(editor, 'An older shortcut message.');
     await expect(editor).toBeFocused();
     await expect(alice.getByRole('menu')).toHaveCount(0);
     await editor.fill('');
@@ -64,7 +65,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
     await expect(row(bob, 'An older shortcut message.')).toBeVisible();
     await alice.keyboard.press('Escape');
     await expect(editor).toBeFocused();
-    await expect(editor).toHaveValue('');
+    await expectInput(editor, '');
     await editor.fill('An older shortcut message, kept.');
     await alice.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(row(bob, 'An older shortcut message, kept.')).toBeVisible();
@@ -77,7 +78,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(editor).toBeFocused();
-    await expect(editor).toHaveValue(' \n\t ');
+    await expectInput(editor, ' \n\t ');
     await editor.press('Enter');
     await dialog
         .getByRole('button', { name: 'Delete for everyone', exact: true })
@@ -198,7 +199,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
     await bob.locator('.dm-row').filter({ hasText: 'Alice' }).click();
     await send(alice, 'A private shortcut message.');
     await composer.press('ArrowUp');
-    await expect(editor).toHaveValue('A private shortcut message.');
+    await expectInput(editor, 'A private shortcut message.');
     await editor.fill('A private shortcut edit.');
     await editor.press('Enter');
     await expect(row(bob, 'A private shortcut edit.')).toBeVisible();
