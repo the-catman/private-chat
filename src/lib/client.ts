@@ -9,6 +9,7 @@ import type {
     Signal,
     Message,
     CallState,
+    PrekeyBundle,
 } from '../types';
 import type { SoundCue } from './sounds';
 import {
@@ -22,13 +23,29 @@ import {
     openWithKey,
     grantRecipient,
     messageId,
+    partKey,
+    sealPart,
+    openPart,
+    readPart,
     b64,
     unb64,
 } from './crypto.ts';
-import { normalizeName, MAX_BATCH } from './limits.ts';
+import {
+    normalizeName,
+    MAX_BATCH,
+    PART_BYTES,
+    AUTO_FETCH_BYTES,
+    PROTOCOL,
+} from './limits.ts';
 import { validateContent } from './content.ts';
 import { replaceEmoji } from './emoji.ts';
 import { CallEngine } from './rtc.ts';
+import {
+    Ratchet,
+    RatchetError,
+    browserStorage,
+    claimStorage,
+} from './signal.ts';
 
 const initial = (): ChatState => ({
     phase: 'loading',
@@ -107,6 +124,40 @@ export class ChatClient {
     >();
     seen = new Set<string>();
     private clears = new Map<string, string>();
+    // Keys for received files, so parts can be fetched when someone opens one.
+    private files = new Map<
+        string,
+        { key: CryptoKey; envelope: Envelope; hashes: string[] }
+    >();
+    // Downloaded bytes survive a reconnect if the same message is replayed.
+    private held = new Map<string, Uint8Array<ArrayBuffer>>();
+    // Files arrive as a signed message, then its parts once requested.
+    private incoming = new Map<
+        string,
+        {
+            key: CryptoKey;
+            envelope: Envelope;
+            hashes: string[];
+            bytes: Uint8Array<ArrayBuffer>;
+            received: number;
+        }
+    >();
+    // Uploads run one at a time, each with a small window of unacked parts.
+    private uploads: Promise<void> = Promise.resolve();
+    private uploading = new Map<string, { acked: number; wake: () => void }>();
+    // Signal sessions for the current server boot, owned by one tab at a time.
+    private keys?: { boot: string; ratchet: Ratchet };
+    private owner?: Promise<() => boolean>;
+    private bundles = new Map<
+        number,
+        {
+            resolve: (bundle: PrekeyBundle) => void;
+            reject: (error: Error) => void;
+            timer: ReturnType<typeof setTimeout>;
+        }
+    >();
+    private bundleRequest = 0;
+    private rekeyed = new Map<string, number>();
     retryCount = 0;
     stopped = false;
     private joiningCall = false;
@@ -186,8 +237,17 @@ export class ChatClient {
             });
         }
     }
+    private outdated(config: SessionConfig) {
+        if (config.protocol === PROTOCOL) return false;
+        this.update({
+            phase: 'login',
+            error: 'Hush was updated. Restart the server, then reload this page.',
+        });
+        return true;
+    }
     async start(name: string, config: SessionConfig) {
         this.stopped = false;
+        if (this.outdated(config)) return;
         if (this.state.config?.boot !== config.boot) {
             this.pending.clear();
             this.seen.clear();
@@ -204,8 +264,9 @@ export class ChatClient {
             error: '',
         });
         this.rtc = new CallEngine(
-            this.identity.id,
+            this.identity,
             config,
+            (packet) => this.wire(packet),
             (id, payload) => this.signal(id, payload),
             this.setCall,
             this.notify
@@ -216,25 +277,48 @@ export class ChatClient {
         this.liveHistory = false;
         clearTimeout(this.retryTimer);
         this.queue = Promise.resolve();
+        this.incoming.clear();
         const ws = new WebSocket(
             `${location.origin.replace(/^https:/, 'wss:')}/ws`
         );
+        ws.binaryType = 'arraybuffer';
         this.ws = ws;
         ws.onmessage = (event) => {
+            let packet: ServerPacket | undefined;
+            if (typeof event.data === 'string') {
+                try {
+                    packet = JSON.parse(event.data) as ServerPacket;
+                } catch {
+                    return;
+                }
+                // A message waiting on these keys may be holding the queue.
+                if (packet.type === 'bundle') return this.answer(packet);
+            }
             this.queue = this.queue
                 .then(async () => {
                     if (this.ws !== ws || this.stopped) return;
-                    const packet = JSON.parse(event.data);
-                    await this.receive(packet);
+                    if (event.data instanceof ArrayBuffer)
+                        return this.receivePart(new Uint8Array(event.data));
+                    await this.receive(packet!);
                 })
-                .catch(() =>
+                .catch((error) =>
                     this.notify(
-                        'An encrypted message could not be verified. It was not displayed.'
+                        error instanceof RatchetError
+                            ? 'A message could not be decrypted in this browser. New messages will still arrive.'
+                            : 'An encrypted message could not be verified. It was not displayed.'
                     )
                 );
         };
         ws.onclose = (event) => {
-            if (this.ws !== ws || this.stopped) return;
+            this.wakeUploads();
+            if (this.ws !== ws) return;
+            for (const request of this.bundles.keys())
+                this.answer({
+                    type: 'bundle',
+                    request,
+                    error: 'Connection lost.',
+                });
+            if (this.stopped) return;
             this.cancelConfirmations(
                 'Connection lost. Reconnect to check the latest messages.'
             );
@@ -258,6 +342,7 @@ export class ChatClient {
                 async () => {
                     try {
                         const config = await this.request('session');
+                        if (this.outdated(config)) return;
                         if (config.boot !== this.state.config!.boot) {
                             this.update({ messages: [] });
                             this.pending.clear();
@@ -290,7 +375,82 @@ export class ChatClient {
             throw new Error('Reconnecting. Your draft is safe in this tab.');
         this.ws.send(JSON.stringify(packet));
     }
+    // Signal state lasts for one server boot and lives in one tab at a time.
+    private async useRatchet(boot: string) {
+        let owner = await this.owner;
+        // After another tab took over, reload its newer state before sealing.
+        const stolen = owner && !owner();
+        if (!owner || stolen) owner = await (this.owner = claimStorage());
+        if (stolen || this.keys?.boot !== boot)
+            this.keys = {
+                boot,
+                ratchet: await new Ratchet(
+                    this.identity,
+                    await browserStorage(boot, owner)
+                ).load(),
+            };
+        this.keys.ratchet.fetch = (id) => this.bundle(id);
+        this.identity.ratchet = this.keys.ratchet;
+    }
+    private bundle(id: string) {
+        return new Promise<PrekeyBundle>((resolve, reject) => {
+            const request = ++this.bundleRequest;
+            const timer = setTimeout(
+                () =>
+                    this.answer({
+                        type: 'bundle',
+                        request,
+                        error: 'Could not reach this person’s keys. Try again.',
+                    }),
+                10_000
+            );
+            this.bundles.set(request, { resolve, reject, timer });
+            try {
+                this.wire({ type: 'bundle', request, id });
+            } catch (error) {
+                this.answer({
+                    type: 'bundle',
+                    request,
+                    error:
+                        error instanceof Error
+                            ? error.message
+                            : 'Not connected.',
+                });
+            }
+        });
+    }
+    private answer(packet: Extract<ServerPacket, { type: 'bundle' }>) {
+        const pending = this.bundles.get(packet.request);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.bundles.delete(packet.request);
+        if (packet.bundle) pending.resolve(packet.bundle);
+        else pending.reject(new Error(packet.error || 'No keys available.'));
+    }
+    // A lost session heals with a new X3DH; the empty signal moves the peer to it.
+    private async rekey(id: string) {
+        if (Date.now() - (this.rekeyed.get(id) || 0) < 30_000) return;
+        this.rekeyed.set(id, Date.now());
+        const peer = this.state.peers.find((p) => p.id === id);
+        if (!peer?.online) return;
+        try {
+            await this.identity.ratchet.restart(peer);
+            await this.signal(id, { rekey: true });
+        } catch {}
+    }
+    wirePart(frame: Uint8Array<ArrayBuffer>) {
+        if (this.stopped || this.ws?.readyState !== WebSocket.OPEN)
+            throw new Error('Reconnecting. Your file will resume.');
+        this.ws.send(frame);
+    }
     async receive(packet: ServerPacket) {
+        if (
+            packet.type === 'media' ||
+            packet.type === 'mls' ||
+            packet.type === 'producer' ||
+            packet.type === 'producer-closed'
+        )
+            return this.rtc?.receiveServer(packet);
         const socket = this.ws;
         const boot = this.state.config?.boot;
         const contentScope =
@@ -307,16 +467,20 @@ export class ChatClient {
         if (packet.type === 'challenge') {
             if (packet.boot !== this.state.config!.boot)
                 throw new Error('The server restarted.');
-            const signature = await sign(
-                this.identity,
-                proofText(
-                    location.origin,
-                    packet.boot,
-                    packet.nonce,
-                    this.identity.id,
-                    this.state.name
-                )
-            );
+            await this.useRatchet(packet.boot);
+            const [signature, prekeys] = await Promise.all([
+                sign(
+                    this.identity,
+                    proofText(
+                        location.origin,
+                        packet.boot,
+                        packet.nonce,
+                        this.identity.id,
+                        this.state.name
+                    )
+                ),
+                this.identity.ratchet.publish(20),
+            ]);
             if (!current()) return;
             return this.wire({
                 type: 'join',
@@ -324,13 +488,25 @@ export class ChatClient {
                 bundle: this.identity.bundle,
                 name: this.state.name,
                 sig: signature,
+                prekeys,
             });
+        }
+        if (packet.type === 'prekeys') {
+            const prekeys = await this.identity.ratchet.publish(20);
+            if (current()) this.wire({ type: 'prekeys', ...prekeys });
+            return;
         }
         if (packet.type === 'ready') {
             this.liveHistory = false;
             this.retryCount = 0;
             localStorage.setItem('hush-name', this.state.name);
             this.seen.clear();
+            this.incoming.clear();
+            this.files.clear();
+            this.held.clear();
+            for (const m of this.state.messages)
+                if (m.bytes && !this.pending.has(m.id))
+                    this.held.set(m.envelope.id, m.bytes);
             // Rebuild from the server's current ciphertext, including offline deletions.
             this.update({
                 phase: 'online',
@@ -362,11 +538,16 @@ export class ChatClient {
             const marker = `${boot}:${packet.id}`;
             if (this.clears.get(packet.scope) === marker) return;
             this.clears.set(packet.scope, marker);
+            this.identity.ratchet.forgetScope(packet.scope);
             for (const [id, envelope] of this.pending) {
                 if (envelope.scope !== packet.scope) continue;
                 this.pending.delete(id);
                 this.confirm(id, new Error('This conversation was cleared.'));
             }
+            for (const map of [this.incoming, this.files])
+                for (const [id, item] of map)
+                    if (item.envelope.scope === packet.scope) map.delete(id);
+            this.wakeUploads();
             this.update({
                 messages: this.state.messages.filter(
                     (m) => m.scope !== packet.scope
@@ -436,9 +617,20 @@ export class ChatClient {
         }
         if (packet.type === 'history-end') {
             this.liveHistory = true;
+            this.held.clear();
             for (const envelope of this.pending.values())
                 if (envelope.boot === this.state.config!.boot)
-                    this.wire({ type: 'envelope', envelope });
+                    this.transmit(envelope);
+            return;
+        }
+        if (packet.type === 'progress') {
+            const upload = this.uploading.get(packet.id);
+            if (upload) {
+                upload.acked = Math.max(upload.acked, packet.parts);
+                upload.wake();
+            }
+            const parts = this.pending.get(packet.id)?.parts;
+            if (parts) this.progress(packet.id, packet.parts / parts);
             return;
         }
         if (packet.type === 'ack') {
@@ -446,24 +638,38 @@ export class ChatClient {
                 this.cue('sent');
             this.pending.delete(packet.id);
             this.confirm(packet.id);
+            this.wakeUploads();
             this.update({
                 messages: this.state.messages
                     .filter((m) => !packet.deleted || m.id !== packet.id)
                     .map((m) =>
-                        m.id === packet.id ? { ...m, status: 'sent' } : m
+                        m.id === packet.id
+                            ? { ...m, status: 'sent', progress: undefined }
+                            : m
                     ),
             });
             return;
         }
         if (packet.type === 'error') {
+            if (this.incoming.has(packet.id) && !this.pending.has(packet.id)) {
+                this.incoming.delete(packet.id);
+                this.patch(packet.id, {
+                    progress: undefined,
+                    unavailable: true,
+                });
+                return this.notify(packet.message);
+            }
             this.confirm(packet.id, new Error(packet.message));
             if (this.pending.get(packet.id)?.type !== 'chat')
                 this.pending.delete(packet.id);
             this.update({
                 messages: this.state.messages.map((m) =>
-                    m.id === packet.id ? { ...m, status: 'failed' } : m
+                    m.id === packet.id
+                        ? { ...m, status: 'failed', progress: undefined }
+                        : m
                 ),
             });
+            this.wakeUploads();
             this.notify(packet.message);
             return;
         }
@@ -472,20 +678,37 @@ export class ChatClient {
         if (this.seen.has(m.id)) return;
         const sender = this.state.peers.find((p) => p.id === m.from);
         if (!sender) throw new Error('Unknown sender.');
-        const decrypted = await open<unknown>(
-            this.identity,
-            sender,
-            this.state.config!.boot,
-            m
+        let parts: CryptoKey | undefined;
+        let decrypted: unknown;
+        const session = this.state.config!.boot;
+        const key = await contentKey(this.identity, sender, session, m).catch(
+            (error) => {
+                if (error instanceof RatchetError) void this.rekey(sender.id);
+                throw error;
+            }
         );
-        if (!current()) return;
+        try {
+            decrypted = await openWithKey(sender, session, m, key);
+            if (m.type === 'chat' && m.parts) parts = await partKey(key);
+        } finally {
+            key.fill(0);
+        }
+        if (!current()) {
+            // Keep the key for a replay after a reconnect, but not after a clear.
+            if (contentScope && this.clears.get(contentScope) !== clearMarker)
+                this.identity.ratchet.forget([m.id]);
+            return;
+        }
         if (!decrypted || typeof decrypted !== 'object')
             throw new Error('Invalid payload.');
         this.seen.add(m.id);
         if (this.seen.size > 14000)
             this.seen.delete(this.seen.values().next().value!);
-        if (m.type === 'signal')
+        if (m.type === 'signal') {
+            // Opening a rekey signal already moved to the new session.
+            if ('rekey' in decrypted) return;
             return this.rtc?.receive(m.from, decrypted as Signal);
+        }
         if (m.type === 'typing') {
             this.update({
                 typing: {
@@ -510,15 +733,25 @@ export class ChatClient {
         if (m.type === 'delete') {
             if ((decrypted as { kind?: string }).kind !== 'delete')
                 throw new Error('Invalid deletion.');
+            for (const id of m.targets || []) {
+                this.incoming.delete(id);
+                this.files.delete(id);
+            }
+            const removed = (item: Message) =>
+                m.targets?.includes(item.id) &&
+                item.from === m.from &&
+                item.scope === m.scope;
+            this.identity.ratchet.forget(
+                this.state.messages
+                    .filter(removed)
+                    .flatMap((item) => [
+                        item.id,
+                        item.envelope.id,
+                        item.historyGrant?.id ?? '',
+                    ])
+            );
             this.update({
-                messages: this.state.messages.filter(
-                    (item) =>
-                        !(
-                            m.targets?.includes(item.id) &&
-                            item.from === m.from &&
-                            item.scope === m.scope
-                        )
-                ),
+                messages: this.state.messages.filter((item) => !removed(item)),
             });
             return;
         }
@@ -566,6 +799,7 @@ export class ChatClient {
                     envelope,
                     raw
                 );
+                if (envelope.parts) parts = await partKey(raw);
             } finally {
                 raw.fill(0);
             }
@@ -573,10 +807,35 @@ export class ChatClient {
         }
         if (!current()) return;
         const payload = validateContent(contents);
+        if (
+            payload.kind === 'file'
+                ? payload.hashes.length !== envelope.parts || !parts
+                : envelope.parts !== undefined
+        )
+            throw new Error('Invalid file message.');
         const id = messageId(envelope);
         const existing = this.state.messages.find((item) => item.id === id);
         if (existing && existing.from !== envelope.from)
             throw new Error('Message author changed.');
+        // An edit replaces the earlier revision and its history grants.
+        if (existing && existing.envelope.id !== envelope.id)
+            this.identity.ratchet.forget([
+                existing.envelope.id,
+                existing.historyGrant?.id ?? '',
+            ]);
+        let bytes: Uint8Array<ArrayBuffer> | undefined;
+        if (payload.kind === 'file') {
+            // Reuse bytes already downloaded or uploaded for this exact message.
+            bytes =
+                existing?.envelope.id === envelope.id && existing.bytes
+                    ? existing.bytes
+                    : this.held.get(envelope.id);
+            this.files.set(id, {
+                key: parts!,
+                envelope,
+                hashes: payload.hashes,
+            });
+        }
         const message: Message = {
             id,
             from: envelope.from,
@@ -590,6 +849,7 @@ export class ChatClient {
             edited: envelope.type === 'edit',
             sharedBy,
             historyGrant: m.type === 'share' ? m : undefined,
+            bytes,
         };
         const messages = this.state.messages.filter((item) => item.id !== id);
         messages.push(message);
@@ -603,12 +863,152 @@ export class ChatClient {
             unread[message.scope] = (unread[message.scope] || 0) + 1;
         this.update({ messages, unread });
         if (
+            payload.kind === 'file' &&
+            !bytes &&
+            payload.size <= AUTO_FETCH_BYTES
+        )
+            this.fetchFile(id);
+        if (
             this.liveHistory &&
             m.type === 'chat' &&
             !existing &&
             message.from !== this.identity.id
         )
             this.cue('received');
+    }
+
+    fetchFile(id: string) {
+        const file = this.files.get(id);
+        const message = this.state.messages.find((m) => m.id === id);
+        if (!file || !message || message.bytes || this.incoming.has(id)) return;
+        if (message.payload.kind !== 'file') return;
+        this.incoming.set(id, {
+            ...file,
+            bytes: new Uint8Array(message.payload.size),
+            received: 0,
+        });
+        this.patch(id, { progress: 0, unavailable: false });
+        try {
+            this.wire({ type: 'fetch', id });
+        } catch (error) {
+            this.incoming.delete(id);
+            this.patch(id, { progress: undefined });
+            this.notify(
+                error instanceof Error ? error.message : 'Not connected.'
+            );
+        }
+    }
+    private async receivePart(frame: Uint8Array<ArrayBuffer>) {
+        const { id, index, data } = readPart(frame);
+        const item = this.incoming.get(id);
+        if (!item) return;
+        let bytes: Uint8Array<ArrayBuffer>;
+        try {
+            if (index !== item.received || index >= item.hashes.length)
+                throw new Error('File parts arrived out of order.');
+            bytes = await openPart(
+                item.key,
+                item.envelope,
+                index,
+                data,
+                item.hashes[index]
+            );
+            if (
+                bytes.length !==
+                Math.min(PART_BYTES, item.bytes.length - index * PART_BYTES)
+            )
+                throw new Error('A file part has the wrong size.');
+        } catch (error) {
+            if (this.incoming.get(id) === item) {
+                this.incoming.delete(id);
+                this.patch(id, { progress: undefined, unavailable: true });
+            }
+            throw error;
+        }
+        if (this.incoming.get(id) !== item || this.stopped) return;
+        item.bytes.set(bytes, index * PART_BYTES);
+        if (++item.received < item.hashes.length)
+            return this.progress(id, item.received / item.hashes.length);
+        this.incoming.delete(id);
+        this.patch(id, { bytes: item.bytes, progress: undefined });
+    }
+    private patch(id: string, patch: Partial<Message>) {
+        this.update({
+            messages: this.state.messages.map((m) =>
+                m.id === id ? { ...m, ...patch } : m
+            ),
+        });
+    }
+    private progress(id: string, value: number) {
+        // Re-render at most once per percent, not once per part.
+        const message = this.state.messages.find((m) => m.id === id);
+        if (
+            message?.progress !== undefined &&
+            Math.floor(message.progress * 100) !== Math.floor(value * 100)
+        )
+            this.patch(id, { progress: value });
+    }
+    private wakeUploads() {
+        for (const upload of this.uploading.values()) upload.wake();
+    }
+    private transmit(envelope: Envelope) {
+        if (!envelope.parts) return this.wire({ type: 'envelope', envelope });
+        const socket = this.ws;
+        this.uploads = this.uploads
+            .then(() => this.upload(envelope, socket))
+            .catch(() => {});
+    }
+    private async upload(envelope: Envelope, socket?: WebSocket) {
+        const id = envelope.id;
+        const total = envelope.parts!;
+        const live = () =>
+            !this.stopped &&
+            this.ws === socket &&
+            socket?.readyState === WebSocket.OPEN &&
+            this.pending.get(id) === envelope &&
+            this.state.messages.some(
+                (m) => m.id === id && m.status === 'sending'
+            );
+        const bytes = this.state.messages.find((m) => m.id === id)?.bytes;
+        if (!live() || !bytes) return;
+        const raw = await contentKey(
+            this.identity,
+            this.identity,
+            this.state.config!.boot,
+            envelope
+        );
+        let key: CryptoKey;
+        try {
+            key = await partKey(raw);
+        } finally {
+            raw.fill(0);
+        }
+        const upload = { acked: 0, wake: () => {} };
+        const acked = () =>
+            new Promise<void>((resolve) => {
+                upload.wake = resolve;
+            });
+        this.uploading.set(id, upload);
+        try {
+            if (!live()) return;
+            this.wire({ type: 'envelope', envelope });
+            for (let index = 0; index < total; index++) {
+                while (live() && index - upload.acked >= 8) await acked();
+                if (!live()) return;
+                const part = await sealPart(
+                    key,
+                    envelope,
+                    index,
+                    bytes.subarray(index * PART_BYTES, (index + 1) * PART_BYTES)
+                );
+                if (!live()) return;
+                this.wirePart(part);
+            }
+            // Finish before the next upload starts so both stay within the window.
+            while (live()) await acked();
+        } finally {
+            if (this.uploading.get(id) === upload) this.uploading.delete(id);
+        }
     }
 
     private confirm(id: string, error?: Error) {
@@ -815,8 +1215,18 @@ export class ChatClient {
             );
         return [self, ...others];
     }
-    async send(payload: Content, scope = this.state.scope) {
+    async send(
+        payload: Content,
+        scope = this.state.scope,
+        bytes?: Uint8Array<ArrayBuffer>
+    ) {
         validateContent(payload);
+        if (
+            payload.kind === 'file'
+                ? bytes?.length !== payload.size
+                : bytes !== undefined
+        )
+            throw new Error('This file changed. Choose it again.');
         const socket = this.ws;
         const clearMarker = this.clears.get(scope);
         const envelope = await seal(
@@ -825,7 +1235,8 @@ export class ChatClient {
             this.state.config!.boot,
             scope,
             'chat',
-            payload
+            payload,
+            payload.kind === 'file' ? { parts: payload.hashes.length } : {}
         );
         if (this.clears.get(scope) !== clearMarker)
             throw new Error(
@@ -855,18 +1266,26 @@ export class ChatClient {
                     status: 'sending',
                     envelope,
                     audience: Object.keys(envelope.keys),
+                    bytes,
+                    progress: bytes ? 0 : undefined,
                 },
             ],
         });
-        this.wire({ type: 'envelope', envelope });
+        this.transmit(envelope);
     }
     retry(id: string) {
         const envelope = this.pending.get(id);
         if (envelope) {
-            this.wire({ type: 'envelope', envelope });
+            this.transmit(envelope);
             this.update({
                 messages: this.state.messages.map((m) =>
-                    m.id === id ? { ...m, status: 'sending' } : m
+                    m.id === id
+                        ? {
+                              ...m,
+                              status: 'sending',
+                              progress: envelope.parts ? 0 : undefined,
+                          }
+                        : m
                 ),
             });
         }
@@ -888,7 +1307,7 @@ export class ChatClient {
             });
         } catch {}
     }
-    async signal(id: string, payload: Signal) {
+    async signal(id: string, payload: Signal | { rekey: true }) {
         const scope = dmScope(this.identity.id, id);
         this.wire({
             type: 'envelope',
@@ -912,11 +1331,12 @@ export class ChatClient {
             this.recipients(scope);
             if (!this.rtc) return;
             if (this.rtc.scope) this.leaveCall();
+            this.rtc.members = this.state.peers;
             await this.rtc.join(scope, video);
-            this.wire({ type: 'call', scope });
             this.rtc.sync(this.state.peers);
         } catch (error) {
-            this.rtc?.stop();
+            if (this.rtc?.scope) this.leaveCall();
+            else this.rtc?.stop();
             this.notify(
                 error instanceof Error
                     ? error.message
@@ -944,6 +1364,10 @@ export class ChatClient {
         this.pending.clear();
         this.seen.clear();
         this.clears.clear();
+        this.incoming.clear();
+        this.files.clear();
+        this.held.clear();
+        this.wakeUploads();
         this.update({ ...initial(), phase: 'login' });
     }
 }

@@ -1,13 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-    createIdentity,
-    seal,
-    open,
-    dmScope,
-    safetyCode,
-    unb64,
-} from '../src/lib/crypto';
+import { seal, open, dmScope, safetyCode, unb64 } from '../src/lib/crypto';
+import { createIdentity } from './identities';
 
 test('only intended recipients can decrypt text and binary voice content', async () => {
     const [alice, bob, outsider] = await Promise.all([

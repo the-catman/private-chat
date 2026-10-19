@@ -3,7 +3,6 @@ import {
     randomBytes,
     randomUUID,
     createHash,
-    createHmac,
     timingSafeEqual,
 } from 'node:crypto';
 import express, {
@@ -13,11 +12,14 @@ import express, {
 } from 'express';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Config } from './config';
+import { CallError, createCalls } from './calls.ts';
 import type { Frontend } from './frontend';
 import type {
     Bundle,
     ClientPacket,
     Envelope,
+    Prekey,
+    Prekeys,
     ServerPacket,
 } from '../src/types';
 import { resolve } from 'node:path';
@@ -28,11 +30,17 @@ import {
     proofText,
     signedText,
     dmScope,
+    prekeyText,
     VERSION,
 } from '../src/lib/crypto.ts';
+import { validPrekey, validRatchetKey } from '../src/lib/signal.ts';
 import {
     MAX_BATCH,
     MAX_ENCRYPTED_LENGTH,
+    MAX_PARTS,
+    PART_BYTES,
+    PART_HEADER,
+    PROTOCOL,
     nameKey,
     normalizeName,
     validName,
@@ -47,6 +55,9 @@ type StoredMessage = {
     audience: Set<string>;
     grants: Map<string, Envelope>;
     bytes: number;
+    // Encrypted file part frames, relayed exactly as the author sent them.
+    parts?: Buffer[];
+    upload?: { ws: ClientSocket; timer: ReturnType<typeof setTimeout> };
 };
 interface ClientSocket extends WebSocket {
     auth: Session;
@@ -55,7 +66,10 @@ interface ClientSocket extends WebSocket {
     alive: boolean;
     recent: Set<string>;
     pending: number;
+    pendingParts: number;
     queue: Promise<void>;
+    outbox: { id: string; record: StoredMessage; index: number }[];
+    partTimer?: ReturnType<typeof setTimeout>;
     window: { start: number; packets: number; bytes: number };
     joinTimer?: ReturnType<typeof setTimeout>;
     historyTimer?: ReturnType<typeof setTimeout>;
@@ -67,13 +81,18 @@ type Member = {
     bundle: Bundle;
     ws: ClientSocket | null;
     call: string | null;
+    // Public Signal prekeys. Each one-time key is handed out only once.
+    prekeys: Prekeys;
+    replenishing: boolean;
 };
 
 const ID = /^[A-Za-z0-9_-]{43}$/;
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const B64 = /^[A-Za-z0-9_-]+$/;
-const MAX_PACKET = 10 * 1024 * 1024;
+const MAX_PACKET = 4 * 1024 * 1024;
+const PART_FRAME = PART_HEADER + PART_BYTES + 16;
+const UPLOAD_IDLE_MS = 60_000;
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const COOKIE = '__Host-hush';
 const plain = (x: unknown): x is Record<string, unknown> =>
@@ -81,6 +100,22 @@ const plain = (x: unknown): x is Record<string, unknown> =>
 const hash = (x: string) => createHash('sha256').update(x).digest();
 const encoded = (x: unknown, min: number, max = min): x is string =>
     typeof x === 'string' && x.length >= min && x.length <= max && B64.test(x);
+const MAX_PREKEYS = 100;
+const validPrekeys = (x: unknown, have = 0): x is Prekey[] =>
+    Array.isArray(x) &&
+    x.length <= MAX_PREKEYS - have &&
+    x.every(validPrekey) &&
+    new Set(x.map((p) => p.id)).size === x.length;
+// Exactly a prekey id, key and the identity's signature over it.
+async function signedPrekey(bundle: Bundle, spk: unknown) {
+    if (!plain(spk) || Object.keys(spk).length !== 3) return false;
+    const { id, key, sig } = spk;
+    return (
+        validPrekey({ id, key }) &&
+        encoded(sig, 86) &&
+        verify(bundle, prekeyText(key as string), sig)
+    );
+}
 
 export function createChatServer(
     config: Config,
@@ -107,6 +142,7 @@ export function createChatServer(
     let globalAttempts = { start: Date.now(), count: 0 };
     const passwordHash = hash(config.password);
     const sockets = new Set<ClientSocket>();
+    const calls = createCalls(config);
     const wss = new WebSocketServer({
         noServer: true,
         maxPayload: MAX_PACKET,
@@ -172,22 +208,6 @@ export function createChatServer(
             'Content-Type': 'application/json; charset=utf-8',
         });
         res.end(JSON.stringify(body));
-    }
-    function iceServers(auth: Session) {
-        const servers: RTCIceServer[] = config.stunUrls.length
-            ? [{ urls: config.stunUrls }]
-            : [];
-        if (config.turnUrls.length) {
-            const username = `${Math.floor(auth.expires / 1000)}:${auth.id}`;
-            servers.push({
-                urls: config.turnUrls,
-                username,
-                credential: createHmac('sha1', config.turnSecret)
-                    .update(username)
-                    .digest('base64'),
-            });
-        }
-        return servers;
     }
     function throttle(req: IncomingMessage) {
         const now = Date.now();
@@ -269,10 +289,8 @@ export function createChatServer(
                 return json(res, 200, {
                     boot,
                     maxClients: config.maxClients,
-                    iceServers: iceServers(auth),
-                    relayOnly: config.relayOnly,
-                    hasTurn: Boolean(config.turnUrls.length),
                     expires: auth.expires,
+                    protocol: PROTOCOL,
                 });
             }
             if (req.url === '/api/logout' && req.method === 'POST') {
@@ -451,14 +469,28 @@ export function createChatServer(
                 return false;
         } else if (m.targets !== undefined || m.revision !== undefined)
             return false;
-        return ids.every(
-            (id) =>
+        if (
+            m.parts !== undefined &&
+            (m.type !== 'chat' ||
+                !Number.isSafeInteger(m.parts) ||
+                m.parts < 1 ||
+                m.parts > MAX_PARTS)
+        )
+            return false;
+        // The author keeps a self-sealed copy; recipients get ratchet keys.
+        return ids.every((id) => {
+            const entry: unknown = m.keys[id];
+            return (
                 ID.test(id) &&
                 members.has(id) &&
-                plain(m.keys[id]) &&
-                encoded(m.keys[id].iv, 16) &&
-                encoded(m.keys[id].data, 64)
-        );
+                plain(entry) &&
+                (id === from
+                    ? Object.keys(entry).length === 2 &&
+                      encoded(entry.iv, 16) &&
+                      encoded(entry.data, 64)
+                    : validRatchetKey(entry))
+            );
+        });
     }
 
     async function receive(ws: ClientSocket, data: Buffer) {
@@ -477,8 +509,10 @@ export function createChatServer(
             if (
                 packet.type !== 'join' ||
                 !plain(packet.bundle) ||
-                !encoded(packet.bundle.dh, 87) ||
-                !encoded(packet.bundle.sign, 87) ||
+                !encoded(packet.bundle.dh, 43) ||
+                !encoded(packet.bundle.sign, 43) ||
+                !plain(packet.prekeys) ||
+                !validPrekeys(packet.prekeys.opks) ||
                 !ID.test(packet.id) ||
                 typeof packet.name !== 'string' ||
                 packet.name.length > 64 ||
@@ -492,18 +526,18 @@ export function createChatServer(
                     packet.bundle,
                     proofText(config.origin, boot, ws.nonce, packet.id, name),
                     packet.sig
-                ))
+                )) ||
+                !(await signedPrekey(packet.bundle, packet.prekeys.spk))
             )
                 return ws.close(1008, 'Identity verification failed.');
             const existing = members.get(packet.id);
-            if (existing?.ws)
-                return ws.close(
-                    4009,
-                    'This browser is already connected in another tab.'
-                );
+            // The newest connection wins. A reload or a phone waking up must
+            // not wait for the old socket's ping timeout.
+            const replaced = existing?.ws;
             if (
+                !replaced &&
                 Array.from(members.values()).filter((m) => m.ws).length >=
-                config.maxClients
+                    config.maxClients
             )
                 return ws.close(
                     4004,
@@ -533,6 +567,13 @@ export function createChatServer(
                 ws.auth.expires <= Date.now()
             )
                 return;
+            if (replaced) {
+                existing!.ws = null;
+                calls.leave(packet.id);
+                for (const [id, record] of history)
+                    if (record.upload?.ws === replaced) drop(id, false);
+                replaced.close(4009, 'Hush was opened in another tab.');
+            }
             ws.memberId = packet.id;
             clearTimeout(ws.joinTimer);
             nameOwners.set(nameKey(name), packet.id);
@@ -542,6 +583,14 @@ export function createChatServer(
                 bundle: { dh: packet.bundle.dh, sign: packet.bundle.sign },
                 ws,
                 call: null,
+                prekeys: {
+                    spk: packet.prekeys.spk,
+                    opks: packet.prekeys.opks.map(({ id, key }) => ({
+                        id,
+                        key,
+                    })),
+                },
+                replenishing: false,
             });
             send(ws, { type: 'ready', boot, peers: peers() });
             for (const cleared of clears.values()) {
@@ -584,8 +633,7 @@ export function createChatServer(
                 });
             for (const [id, record] of history) {
                 if (record.envelope.scope !== packet.scope) continue;
-                historyBytes -= record.bytes;
-                history.delete(id);
+                drop(id, true);
             }
             operations.add(packet.id);
             const cleared = {
@@ -601,11 +649,109 @@ export function createChatServer(
             }
             return send(ws, { type: 'ack', id: packet.id });
         }
+        if (packet.type === 'fetch') {
+            if (typeof packet.id !== 'string' || !UUID.test(packet.id))
+                return ws.close(1008, 'Invalid file request.');
+            const record = history.get(packet.id);
+            if (
+                !record?.parts ||
+                record.upload ||
+                !record.audience.has(member.id)
+            )
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'That file is no longer available.',
+                });
+            // One transfer per file at a time, however often it is requested.
+            if (!ws.outbox.some((item) => item.id === packet.id)) {
+                ws.outbox.push({ id: packet.id, record, index: 0 });
+                pumpParts(ws);
+            }
+            return;
+        }
+        if (packet.type === 'bundle') {
+            const request = packet.request;
+            if (!Number.isSafeInteger(request) || request < 1)
+                return ws.close(1008, 'Invalid key request.');
+            const owner =
+                typeof packet.id === 'string' && packet.id !== member.id
+                    ? members.get(packet.id)
+                    : undefined;
+            if (!owner)
+                return send(ws, {
+                    type: 'bundle',
+                    request,
+                    error: 'That person is no longer here.',
+                });
+            const opk = owner.prekeys.opks.shift();
+            send(ws, {
+                type: 'bundle',
+                request,
+                bundle: { spk: owner.prekeys.spk, ...(opk && { opk }) },
+            });
+            if (
+                owner.ws &&
+                !owner.replenishing &&
+                owner.prekeys.opks.length < 5
+            ) {
+                owner.replenishing = true;
+                send(owner.ws, {
+                    type: 'prekeys',
+                    remaining: owner.prekeys.opks.length,
+                });
+            }
+            return;
+        }
+        if (packet.type === 'prekeys') {
+            if (
+                !validPrekeys(packet.opks, member.prekeys.opks.length) ||
+                !(await signedPrekey(member.bundle, packet.spk))
+            )
+                return ws.close(1008, 'Invalid prekeys.');
+            member.prekeys.spk = packet.spk;
+            member.prekeys.opks.push(
+                ...packet.opks.map(({ id, key }) => ({ id, key }))
+            );
+            member.replenishing = false;
+            return;
+        }
         if (packet.type === 'call') {
             if (packet.scope !== null && !validScope(packet.scope, member.id))
                 return ws.close(1008, 'Invalid call.');
+            if (packet.scope)
+                calls.join(packet.scope, member.id, (p) => send(ws, p));
+            else calls.leave(member.id);
             member.call = packet.scope;
             broadcastPeers();
+            return;
+        }
+        if (packet.type === 'media' || packet.type === 'mls') {
+            if (data.length > 300_000) return ws.close(1008, 'Invalid call.');
+            if (packet.type === 'mls') {
+                try {
+                    calls.mls(member.id, packet);
+                } catch {
+                    return ws.close(1008, 'Invalid call.');
+                }
+                return;
+            }
+            const request = packet.request;
+            if (!Number.isSafeInteger(request) || request < 1)
+                return ws.close(1008, 'Invalid call.');
+            try {
+                const result = await calls.request(member.id, packet);
+                send(ws, { type: 'media', request, data: result });
+            } catch (error) {
+                send(ws, {
+                    type: 'media',
+                    request,
+                    error:
+                        error instanceof CallError
+                            ? error.message
+                            : 'The call server rejected that request.',
+                });
+            }
             return;
         }
         if (packet.type !== 'envelope')
@@ -624,8 +770,10 @@ export function createChatServer(
         )
             return;
         const persistent = !['signal', 'typing'].includes(m.type);
+        if (m.type === 'chat' && history.get(m.id)?.upload) return;
         if (operations.has(m.id) || ws.recent.has(m.id)) {
-            if (m.type === 'chat' && history.has(m.id))
+            // Resending a whole file only because an ack was lost wastes RAM and bandwidth.
+            if (m.type === 'chat' && history.has(m.id) && !m.parts)
                 deliver(ws, history.get(m.id)!);
             return send(ws, {
                 type: 'ack',
@@ -647,19 +795,29 @@ export function createChatServer(
         const full = (delta: number) =>
             historyBytes + delta > config.maxHistoryBytes;
         if (m.type === 'chat') {
-            if (full(size) || history.size >= 10000)
+            // Reserve the largest possible file up front; finish() trims it.
+            const reserved = size + (m.parts || 0) * PART_FRAME;
+            if (full(reserved) || history.size >= 10000)
                 return fail(
-                    'Server memory is full. Delete some messages or restart the server to make room.'
+                    m.parts
+                        ? 'Server memory is full. Delete some messages or files, or ask the host to raise MAX_HISTORY_MB.'
+                        : 'Server memory is full. Delete some messages or restart the server to make room.'
                 );
             const record: StoredMessage = {
                 envelope: m,
                 received: Date.now(),
                 audience: new Set(keys),
                 grants: new Map(),
-                bytes: size,
+                bytes: reserved,
             };
             history.set(m.id, record);
-            historyBytes += size;
+            historyBytes += reserved;
+            if (m.parts) {
+                // Recipients get nothing until every part has arrived.
+                record.parts = [];
+                record.upload = { ws, timer: idle(m.id) };
+                return;
+            }
             for (const id of record.audience) {
                 const target = members.get(id)?.ws;
                 if (target) deliver(target, record);
@@ -672,6 +830,8 @@ export function createChatServer(
                 record.envelope.scope !== m.scope
             )
                 return fail('You can only edit your own existing messages.');
+            if (record.parts)
+                return fail('Files cannot be edited. Send a new file instead.');
             if (
                 record.envelope.id !== m.revision ||
                 !sameAudience(record.audience)
@@ -710,10 +870,7 @@ export function createChatServer(
                     'Message recipients changed. Please try deleting again.'
                 );
             // Validate the entire batch before removing any ciphertext.
-            for (const id of m.targets!) {
-                historyBytes -= history.get(id)!.bytes;
-                history.delete(id);
-            }
+            for (const id of m.targets!) drop(id, true);
             for (const id of audience) {
                 const target = members.get(id)?.ws;
                 if (target)
@@ -727,6 +884,7 @@ export function createChatServer(
             const record = history.get(m.targets![0]);
             if (
                 !record ||
+                record.upload ||
                 record.envelope.scope !== 'room' ||
                 !record.audience.has(member.id)
             )
@@ -787,6 +945,76 @@ export function createChatServer(
         return Buffer.byteLength(JSON.stringify(envelope)) * 2 + 1024;
     }
 
+    // Removed IDs stay in operations so a deleted or cleared upload cannot be
+    // replayed. An interrupted upload may be retried with the same ID.
+    function drop(id: string, final: boolean) {
+        const record = history.get(id);
+        if (!record) return;
+        if (record.upload) {
+            clearTimeout(record.upload.timer);
+            if (final) operations.add(id);
+        }
+        historyBytes -= record.bytes;
+        history.delete(id);
+    }
+    function idle(id: string) {
+        return setTimeout(() => {
+            const record = history.get(id);
+            if (!record?.upload) return;
+            const ws = record.upload.ws;
+            drop(id, false);
+            send(ws, {
+                type: 'error',
+                id,
+                message: 'The file upload stalled. Retry to send it again.',
+            });
+        }, UPLOAD_IDLE_MS);
+    }
+    function receivePart(ws: ClientSocket, frame: Buffer) {
+        if (!sessions.has(ws.auth.token) || ws.auth.expires <= Date.now())
+            return ws.close(
+                4001,
+                'Your session expired. Please sign in again.'
+            );
+        const member = ws.memberId ? members.get(ws.memberId) : undefined;
+        if (!member || member.ws !== ws || ws.readyState !== WebSocket.OPEN)
+            return;
+        const id = frame.toString('latin1', 0, 36);
+        if (!UUID.test(id)) return ws.close(1008, 'Invalid file part.');
+        const record = history.get(id);
+        // Parts can still be in flight after a clear, deletion or timeout.
+        if (!record?.upload || record.upload.ws !== ws) return;
+        const index = frame.readUInt32BE(36);
+        const total = record.envelope.parts!;
+        if (
+            index !== record.parts!.length ||
+            (index < total - 1
+                ? frame.length !== PART_FRAME
+                : frame.length < PART_HEADER + 16 || frame.length > PART_FRAME)
+        )
+            return ws.close(1008, 'Invalid file part.');
+        record.parts!.push(frame);
+        clearTimeout(record.upload.timer);
+        if (record.parts!.length < total) {
+            record.upload.timer = idle(id);
+            return send(ws, { type: 'progress', id, parts: index + 1 });
+        }
+        record.upload = undefined;
+        const bytes =
+            envelopeBytes(record.envelope) +
+            record.parts!.reduce((sum, part) => sum + part.length, 0);
+        historyBytes += bytes - record.bytes;
+        record.bytes = bytes;
+        record.received = Date.now();
+        operations.add(id);
+        for (const person of record.audience) {
+            const target = members.get(person)?.ws;
+            // The author already has the file; only confirm it.
+            if (target && target !== ws) deliver(target, record);
+        }
+        send(ws, { type: 'ack', id });
+    }
+
     function deliver(ws: ClientSocket, record: StoredMessage) {
         const id = ws.memberId!;
         if (!record.audience.has(id)) return;
@@ -808,6 +1036,28 @@ export function createChatServer(
         send(ws, packet);
     }
 
+    // Stream requested parts without filling the socket queue. History
+    // replay goes first so large files never hold back conversations.
+    function pumpParts(ws: ClientSocket) {
+        clearTimeout(ws.partTimer);
+        while (ws.outbox.length && ws.readyState === WebSocket.OPEN) {
+            if (ws.historyIterator || ws.bufferedAmount >= 1024 * 1024) {
+                ws.partTimer = setTimeout(() => pumpParts(ws), 25);
+                return;
+            }
+            const item = ws.outbox[0];
+            if (
+                history.get(item.id) !== item.record ||
+                !item.record.audience.has(ws.memberId!) ||
+                item.index >= item.record.parts!.length
+            ) {
+                ws.outbox.shift();
+                continue;
+            }
+            ws.send(item.record.parts![item.index++], { binary: true });
+        }
+    }
+
     function pumpHistory(ws: ClientSocket) {
         if (ws.readyState !== WebSocket.OPEN || !ws.historyIterator) return;
         let count = 0;
@@ -818,7 +1068,7 @@ export function createChatServer(
                 send(ws, { type: 'history-end' });
                 return;
             }
-            if (next.value.audience.has(ws.memberId!)) {
+            if (!next.value.upload && next.value.audience.has(ws.memberId!)) {
                 deliver(ws, next.value);
                 count++;
             }
@@ -832,7 +1082,9 @@ export function createChatServer(
         ws.alive = true;
         ws.recent = new Set();
         ws.pending = 0;
+        ws.pendingParts = 0;
         ws.queue = Promise.resolve();
+        ws.outbox = [];
         ws.window = { start: Date.now(), packets: 0, bytes: 0 };
         ws.joinTimer = setTimeout(
             () => ws.close(1008, 'Join timed out.'),
@@ -846,7 +1098,26 @@ export function createChatServer(
             const data = Buffer.isBuffer(raw)
                 ? raw
                 : Buffer.from(raw as ArrayBuffer);
-            if (isBinary || ws.pending >= 8)
+            if (isBinary) {
+                // Parts are bounded by the upload's memory reservation and an
+                // in-order index, and the client waits for progress acks.
+                if (
+                    !ws.memberId ||
+                    ws.pendingParts >= 12 ||
+                    data.length < PART_HEADER + 16 ||
+                    data.length > PART_FRAME
+                )
+                    return ws.close(1008, 'Invalid file part.');
+                ws.pendingParts++;
+                ws.queue = ws.queue
+                    .then(() => receivePart(ws, data))
+                    .catch(() => ws.close(1008, 'Invalid request.'))
+                    .finally(() => {
+                        ws.pendingParts--;
+                    });
+                return;
+            }
+            if (ws.pending >= 8)
                 return ws.close(1008, 'Too many pending messages.');
             if (Date.now() - ws.window.start >= 10_000)
                 ws.window = { start: Date.now(), packets: 0, bytes: 0 };
@@ -867,10 +1138,15 @@ export function createChatServer(
             sockets.delete(ws);
             clearTimeout(ws.joinTimer);
             clearTimeout(ws.historyTimer);
+            clearTimeout(ws.partTimer);
+            ws.outbox = [];
+            for (const [id, record] of history)
+                if (record.upload?.ws === ws) drop(id, false);
             const member = ws.memberId ? members.get(ws.memberId) : undefined;
             if (member?.ws === ws) {
                 member.ws = null;
                 member.call = null;
+                calls.leave(member.id);
                 broadcastPeers();
                 broadcast({
                     type: 'presence',
@@ -909,6 +1185,7 @@ export function createChatServer(
     return {
         server,
         boot,
+        calls,
         stats: () => ({
             messages: history.size,
             historyBytes,
@@ -916,8 +1193,11 @@ export function createChatServer(
         }),
         async close() {
             clearInterval(cleanup);
+            await calls.close();
             await frontend?.close();
             for (const ws of sockets) ws.terminate();
+            for (const record of history.values())
+                clearTimeout(record.upload?.timer);
             history.clear();
             operations.clear();
             clears.clear();

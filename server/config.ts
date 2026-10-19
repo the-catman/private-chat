@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 export function readConfig(
     env: Record<string, string | undefined> = process.env
 ) {
@@ -33,34 +35,26 @@ export function readConfig(
             throw new Error(`Invalid ${name}.`);
         return value;
     };
-    const turnUrls = (env.TURN_URLS || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    const stunUrls = (env.STUN_URLS ?? 'stun:stun.l.google.com:19302')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+    const mediaListenIp = env.MEDIA_LISTEN_IP?.trim() || '0.0.0.0';
+    const mediaAddress = env.MEDIA_ANNOUNCED_ADDRESS?.trim() || '';
     if (
-        turnUrls.some((s) => !/^turns?:[^\s]+$/.test(s)) ||
-        stunUrls.some((s) => !/^stuns?:[^\s]+$/.test(s))
+        !isIP(mediaListenIp) ||
+        (mediaAddress &&
+            !isIP(mediaAddress) &&
+            !/^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)*$/i.test(mediaAddress))
     )
-        throw new Error('Invalid ICE server URL.');
-    if (turnUrls.length && !env.TURN_SECRET)
-        throw new Error('TURN_SECRET is required when TURN_URLS is set.');
-    if (env.RELAY_ONLY === 'true' && !turnUrls.length)
-        throw new Error('RELAY_ONLY requires a configured TURN relay.');
+        throw new Error('Invalid MEDIA_LISTEN_IP or MEDIA_ANNOUNCED_ADDRESS.');
     return {
         password,
         origin: url.origin,
         host: url.host,
         port: integer('PORT', 5173, 1, 65535),
         maxClients: integer('MAX_CLIENTS', 4, 2, 8),
-        maxHistoryBytes: integer('MAX_HISTORY_MB', 64, 1, 512) * 1024 * 1024,
-        turnUrls,
-        stunUrls,
-        turnSecret: env.TURN_SECRET || '',
-        relayOnly: env.RELAY_ONLY === 'true',
+        maxHistoryBytes: integer('MAX_HISTORY_MB', 512, 1, 8192) * 1024 * 1024,
+        // Browsers send call media here directly, over UDP or TCP.
+        mediaPort: integer('MEDIA_PORT', 44444, 0, 65535),
+        mediaListenIp,
+        mediaAddress,
     };
 }
 export type Config = ReturnType<typeof readConfig>;

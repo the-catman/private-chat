@@ -28,6 +28,8 @@ const textExtensions = new Set([
     'toml',
 ]);
 export const TEXT_PREVIEW_BYTES = 128 * 1024;
+// Images and PDFs are decoded whole; larger files are download-only.
+export const MEDIA_PREVIEW_BYTES = 32 * 1024 * 1024;
 
 export function attachmentPreview(
     name: string,
@@ -41,6 +43,10 @@ export function attachmentPreview(
         /html|svg/.test(type)
     )
         return null;
+    if (bytes.length > MEDIA_PREVIEW_BYTES)
+        return type === 'text/plain' || textExtensions.has(extension)
+            ? { kind: 'text' }
+            : null;
     const starts = (...signature: number[]) =>
         signature.every((byte, i) => bytes[i] === byte);
     if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))

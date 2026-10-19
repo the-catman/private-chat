@@ -37,3 +37,11 @@ Hush adds worklet initialization/error notifications and starts its control mess
 Messages use the MIT-licensed `react-markdown` and `remark-gfm` packages. Markdown parsing and rendering happen locally; no message contents are sent to another service. Original package notices are in [licenses/Markdown.txt](licenses/Markdown.txt).
 
 The live message editor uses [CodeMirror](https://codemirror.net/) and Lezer, by Marijn Haverbeke and contributors, under the MIT license. The editor and its dependencies are bundled locally. Their notices are in [licenses/CodeMirror.txt](licenses/CodeMirror.txt).
+
+## Messages
+
+Message keys follow Signal's [X3DH](https://signal.org/docs/specifications/x3dh/) and [Double Ratchet](https://signal.org/docs/specifications/doubleratchet/) specifications by Trevor Perrin and Moxie Marlinspike, which are in the public domain. Hush implements them with the browser's Web Crypto API and includes no Signal code.
+
+## Calls
+
+Calls are forwarded by [mediasoup](https://mediasoup.org/) (`mediasoup` 3.30.1 on the server, `mediasoup-client` 3.25.1 in the browser), by Iñaki Baz Castillo and contributors, under the ISC license. Media frames are end-to-end encrypted with a Hush adaptation of Discord's [DAVE protocol](https://daveprotocol.com/); keys come from MLS groups built with [`ts-mls`](https://github.com/LukaJCB/ts-mls) 1.6.4 (MIT), using `@hpke/core` and the `@noble` cryptography packages (MIT). The browser bundle also includes MIT- and ISC-licensed mediasoup-client dependencies. Original notices are in [licenses/Calls.txt](licenses/Calls.txt).

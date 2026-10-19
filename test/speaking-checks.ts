@@ -100,7 +100,11 @@ export async function checkSpeaking(alice: Page, bob: Page) {
     assert.equal(
         await alice.evaluate(() => {
             const mic = window.__testPeers
-                .find((pc) => pc.connectionState === 'connected')!
+                .find(
+                    (pc) =>
+                        pc.connectionState === 'connected' &&
+                        pc.getSenders().some((sender) => sender.track)
+                )!
                 .getSenders()[0].track;
             return window.__testAudioSources.some(
                 (source) =>

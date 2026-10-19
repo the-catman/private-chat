@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -6,7 +7,6 @@ import { WebSocket } from 'ws';
 import { createChatServer } from '../server/app';
 import { readConfig } from '../server/config';
 import {
-    createIdentity,
     dmScope,
     open,
     proofText,
@@ -15,10 +15,19 @@ import {
     contentKey,
     openWithKey,
     grantRecipient,
+    partHashes,
+    partKey,
+    sealPart,
+    readPart,
+    openPart,
     b64,
     unb64,
+    verify,
+    prekeyText,
+    signedText,
 } from '../src/lib/crypto';
-import { normalizeName, MAX_FILE_BYTES } from '../src/lib/limits';
+import { createIdentity } from './identities';
+import { normalizeName, MAX_FILE_BYTES, PART_BYTES } from '../src/lib/limits';
 import { validateContent } from '../src/lib/content';
 import type { Identity, ServerPacket, Envelope } from '../src/types';
 import { request } from 'node:http';
@@ -66,7 +75,9 @@ const password = 'test-password-only-not-a-real-secret';
 const config = readConfig({
     APP_PASSWORD: password,
     APP_ORIGIN: origin,
-    STUN_URLS: '',
+    MEDIA_PORT: '0',
+    MEDIA_LISTEN_IP: '127.0.0.1',
+    MEDIA_ANNOUNCED_ADDRESS: '127.0.0.1',
 });
 const headers = {
     host: 'chat.test',
@@ -101,8 +112,10 @@ async function fixture() {
             headers: { ...headers, cookie },
         });
         const packets: ServerPacket[] = [];
-        ws.on('message', (data) => {
-            packets.push(JSON.parse(data.toString()));
+        const parts: Buffer[] = [];
+        ws.on('message', (data, isBinary) => {
+            if (isBinary) parts.push(data as Buffer);
+            else packets.push(JSON.parse(data.toString()));
         });
         async function wait(type: ServerPacket['type']) {
             const start = Date.now();
@@ -135,6 +148,7 @@ async function fixture() {
                         normalizeName(name)
                     )
                 ),
+                prekeys: await identity.ratchet.publish(20),
             })
         );
         if (rejected) {
@@ -144,6 +158,7 @@ async function fixture() {
                 identity,
                 cookie,
                 packets,
+                parts,
                 wait,
                 code,
                 reason: String(reason),
@@ -151,7 +166,16 @@ async function fixture() {
         }
         await wait('ready');
         await wait('history-end');
-        return { ws, identity, cookie, packets, wait, code: 0, reason: '' };
+        return {
+            ws,
+            identity,
+            cookie,
+            packets,
+            parts,
+            wait,
+            code: 0,
+            reason: '',
+        };
     }
     return { app, url, join, login };
 }
@@ -276,6 +300,40 @@ test('DMs stay between recipients, history survives reconnect, and a fresh proce
     }
 });
 
+test('a reconnecting browser replaces its stale socket instead of being locked out', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const closed = once(alice.ws, 'close');
+        // Same browser, new tab or reload, while the old socket still looks open.
+        const again = await f.join('Alice', alice.identity, alice.cookie);
+        const [code, reason] = await closed;
+        assert.equal(code, 4009);
+        assert.match(String(reason), /another tab/);
+        assert.equal(f.app.stats().online, 2);
+        const envelope = await seal(
+            bob.identity,
+            [bob.identity, alice.identity],
+            f.app.boot,
+            'room',
+            'chat',
+            { kind: 'text', text: 'Reaches the new tab' }
+        );
+        await transmit(bob, envelope);
+        await delivered(again);
+        assert.equal(
+            bob.packets.some(
+                (p) => p.type === 'presence' && p.event.action === 'left'
+            ),
+            false,
+            'replacing a tab is not announced as leaving'
+        );
+    } finally {
+        await f.app.close();
+    }
+});
+
 test('forged signatures and attempts to leak a DM to a third recipient are rejected', async () => {
     for (const mode of ['signature', 'recipient']) {
         const f = await fixture();
@@ -302,6 +360,110 @@ test('forged signatures and attempts to leak a DM to a third recipient are rejec
         } finally {
             await f.app.close();
         }
+    }
+});
+
+test('prekeys are signed, handed out once, replenished, and envelope keys keep their roles', async () => {
+    const f = await fixture();
+    try {
+        const mallory = await createIdentity();
+        const stolen = await (await createIdentity()).ratchet.publish(1);
+        mallory.ratchet.publish = async () => stolen;
+        const refused = await f.join('Mallory', mallory, undefined, true);
+        assert.equal(refused.code, 1008, 'a signed prekey must be our own');
+
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        let request = 0;
+        const ask = async (id: string) => {
+            alice.ws.send(
+                JSON.stringify({ type: 'bundle', request: ++request, id })
+            );
+            const reply = await alice.wait('bundle');
+            if (reply.type !== 'bundle' || reply.request !== request)
+                throw new Error('Unexpected bundle reply');
+            return reply;
+        };
+        assert.match((await ask(alice.identity.id)).error!, /no longer here/);
+        const handed = new Set<number>();
+        for (let i = 0; i < 20; i++) {
+            const { bundle } = await ask(bob.identity.id);
+            assert.ok(bundle?.opk && !handed.has(bundle.opk.id));
+            handed.add(bundle.opk.id);
+            assert.ok(
+                await verify(
+                    bob.identity.bundle,
+                    prekeyText(bundle.spk.key),
+                    bundle.spk.sig
+                )
+            );
+        }
+        const low = await bob.wait('prekeys');
+        assert.deepEqual(low, { type: 'prekeys', remaining: 4 });
+        assert.equal(
+            bob.packets.some((p) => p.type === 'prekeys'),
+            false,
+            'the owner is asked once'
+        );
+        assert.equal((await ask(bob.identity.id)).bundle?.opk, undefined);
+        bob.ws.send(
+            JSON.stringify({
+                type: 'prekeys',
+                ...(await bob.identity.ratchet.publish(20)),
+            })
+        );
+        alice.identity.ratchet.fetch = async (id) => (await ask(id)).bundle!;
+        const envelope = await seal(
+            alice.identity,
+            [alice.identity, bob.identity],
+            f.app.boot,
+            'room',
+            'chat',
+            { kind: 'text', text: 'Through server prekeys' }
+        );
+        const entry = envelope.keys[bob.identity.id];
+        assert.ok('pre' in entry && entry.pre?.opk !== undefined);
+        await transmit(alice, envelope);
+        assert.deepEqual(
+            await open(
+                bob.identity,
+                alice.identity,
+                f.app.boot,
+                (await delivered(bob)).envelope
+            ),
+            { kind: 'text', text: 'Through server prekeys' }
+        );
+
+        // The author's entry is a self key and every other entry a ratchet key.
+        for (const swap of ['author', 'recipient']) {
+            const m = await seal(
+                alice.identity,
+                [alice.identity, bob.identity],
+                f.app.boot,
+                'room',
+                'chat',
+                { kind: 'text', text: 'Wrong roles' }
+            );
+            const [self, other] = [
+                m.keys[alice.identity.id],
+                m.keys[bob.identity.id],
+            ];
+            m.keys =
+                swap === 'author'
+                    ? { [alice.identity.id]: other, [bob.identity.id]: other }
+                    : { [alice.identity.id]: self, [bob.identity.id]: self };
+            m.sig = await sign(alice.identity, signedText(m));
+            const closed = once(alice.ws, 'close');
+            alice.ws.send(JSON.stringify({ type: 'envelope', envelope: m }));
+            assert.equal((await closed)[0], 1008);
+            if (swap === 'author')
+                Object.assign(
+                    alice,
+                    await f.join('Alice', alice.identity, alice.cookie)
+                );
+        }
+    } finally {
+        await f.app.close();
     }
 });
 
@@ -367,6 +529,71 @@ async function delivered(person: Participant) {
     if (packet.type !== 'message') throw new Error('Missing message');
     return packet;
 }
+async function fileMessage(
+    author: Identity,
+    audience: Identity[],
+    boot: string,
+    data: Uint8Array<ArrayBuffer>
+) {
+    const hashes = await partHashes(data);
+    const payload = {
+        kind: 'file' as const,
+        name: 'synthetic-test.dat',
+        mime: 'application/octet-stream',
+        size: data.length,
+        hashes,
+    };
+    const envelope = await seal(
+        author,
+        audience,
+        boot,
+        'room',
+        'chat',
+        payload,
+        {
+            parts: hashes.length,
+        }
+    );
+    const key = await partKey(await contentKey(author, author, boot, envelope));
+    const frames: Uint8Array<ArrayBuffer>[] = [];
+    for (let i = 0; i < hashes.length; i++)
+        frames.push(
+            await sealPart(
+                key,
+                envelope,
+                i,
+                data.subarray(i * PART_BYTES, (i + 1) * PART_BYTES)
+            )
+        );
+    return { envelope, payload, frames };
+}
+async function upload(
+    person: Participant,
+    file: Awaited<ReturnType<typeof fileMessage>>
+) {
+    person.ws.send(
+        JSON.stringify({ type: 'envelope', envelope: file.envelope })
+    );
+    for (const frame of file.frames) person.ws.send(frame);
+    const packet = await person.wait('ack');
+    assert.ok(packet.type === 'ack' && packet.id === file.envelope.id);
+    const progress = person.packets.filter((p) => p.type === 'progress');
+    assert.equal(progress.length, file.frames.length - 1);
+    person.packets.splice(
+        0,
+        Infinity,
+        ...person.packets.filter((p) => p.type !== 'progress')
+    );
+}
+async function receivedParts(person: Participant, count: number, id?: string) {
+    // Recipients fetch parts on demand; the relay never pushes them unasked.
+    if (id) person.ws.send(JSON.stringify({ type: 'fetch', id }));
+    const start = Date.now();
+    while (person.parts.length < count && Date.now() - start < 3000)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(person.parts.length, count);
+    return person.parts.splice(0, count);
+}
 
 test('any room member can clear all authors and shared files, while DMs, calls and replay protection survive', async () => {
     const f = await fixture();
@@ -382,19 +609,11 @@ test('any room member can clear all authors and shared files, while DMs, calls a
             'chat',
             { kind: 'text', text: 'Room history' }
         );
-        const file = await seal(
+        const file = await fileMessage(
             bob.identity,
             audience,
             f.app.boot,
-            'room',
-            'chat',
-            {
-                kind: 'file',
-                name: 'test.txt',
-                mime: 'text/plain',
-                size: 4096,
-                data: b64(new Uint8Array(4096)),
-            }
+            new Uint8Array(4096)
         );
         const scope = dmScope(alice.identity.id, bob.identity.id);
         const dm = await seal(
@@ -405,11 +624,8 @@ test('any room member can clear all authors and shared files, while DMs, calls a
             'chat',
             { kind: 'text', text: 'Private history' }
         );
-        for (const [person, message] of [
-            [alice, original],
-            [bob, file],
-        ] as const)
-            await transmit(person, message);
+        await transmit(alice, original);
+        await upload(bob, file);
         const roomBytes = f.app.stats().historyBytes;
         await transmit(alice, dm);
         const privateBytes = f.app.stats().historyBytes - roomBytes;
@@ -917,61 +1133,306 @@ test('editing and batch deletion enforce ownership, revision, scope and all reci
     }
 });
 
-test('5 MB files are encrypted in RAM, validate at the boundary, and deletion frees storage', async () => {
+test('large files travel as encrypted parts, reach recipients after upload and on reconnect, and free RAM when deleted', async () => {
     const f = await fixture();
     try {
         const alice = await f.join('Alice');
         const bob = await f.join('Bob');
-        const data = new Uint8Array(MAX_FILE_BYTES).fill(61);
-        const payload = {
-            kind: 'file' as const,
-            data: b64(data),
-            name: 'synthetic-test.dat',
-            mime: 'application/octet-stream',
-            size: data.length,
-        };
-        assert.equal(validateContent(payload), payload);
-        assert.throws(() =>
-            validateContent({ ...payload, size: MAX_FILE_BYTES + 1 })
-        );
-        assert.throws(() =>
-            validateContent({ ...payload, data: payload.data.slice(1) })
-        );
-        const envelope = await seal(
+        const audience = [alice.identity, bob.identity];
+        const data = new Uint8Array(PART_BYTES * 2.5).map((_, i) => i % 251);
+        const file = await fileMessage(
             alice.identity,
-            [alice.identity, bob.identity],
+            audience,
             f.app.boot,
-            'room',
-            'chat',
-            payload
+            data
         );
-        await transmit(alice, envelope);
+        assert.equal(validateContent(file.payload), file.payload);
+        assert.throws(() =>
+            validateContent({ ...file.payload, size: MAX_FILE_BYTES + 1 })
+        );
+        assert.throws(() =>
+            validateContent({
+                ...file.payload,
+                hashes: file.payload.hashes.slice(1),
+            })
+        );
+        assert.equal(file.frames.length, 3);
+        alice.ws.send(
+            JSON.stringify({ type: 'envelope', envelope: file.envelope })
+        );
+        alice.ws.send(file.frames[0]);
+        const progress = await alice.wait('progress');
+        assert.ok(progress.type === 'progress' && progress.parts === 1);
+        assert.equal(
+            bob.packets.some((p) => p.type === 'message'),
+            false,
+            'recipients wait for the complete file'
+        );
+        alice.ws.send(file.frames[1]);
+        alice.ws.send(file.frames[2]);
+        await alice.wait('ack');
         const received = await delivered(bob);
-        const file = await open<typeof payload>(
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(bob.parts.length, 0, 'parts wait for a request');
+        const frames = await receivedParts(bob, 3, file.envelope.id);
+        const raw = await contentKey(
             bob.identity,
             alice.identity,
             f.app.boot,
             received.envelope
         );
-        assert.equal(file.name, payload.name);
-        assert.deepEqual(unb64(file.data), data);
+        const payload = await openWithKey<typeof file.payload>(
+            alice.identity,
+            f.app.boot,
+            received.envelope,
+            raw
+        );
+        const key = await partKey(raw);
+        const bytes = new Uint8Array(data.length);
+        for (const frame of frames) {
+            const part = readPart(new Uint8Array(frame));
+            assert.equal(part.id, file.envelope.id);
+            bytes.set(
+                await openPart(
+                    key,
+                    received.envelope,
+                    part.index,
+                    part.data,
+                    payload.hashes[part.index]
+                ),
+                part.index * PART_BYTES
+            );
+        }
+        assert.deepEqual(bytes, data);
         assert.equal(
-            JSON.stringify(received).includes(payload.name),
+            JSON.stringify(received).includes(file.payload.name),
             false,
             'filenames are encrypted too'
         );
-        assert.equal(f.app.stats().messages, 1);
+        assert.equal(alice.parts.length, 0, 'the author is not sent a copy');
+        const stored = f.app.stats().historyBytes;
+        assert.ok(stored > data.length && stored < data.length + 100_000);
+        await assert.rejects(
+            openPart(
+                key,
+                received.envelope,
+                1,
+                readPart(new Uint8Array(frames[0])).data,
+                payload.hashes[1]
+            ),
+            'a part cannot be replayed at another index'
+        );
+        const edit = await seal(
+            alice.identity,
+            audience,
+            f.app.boot,
+            'room',
+            'edit',
+            { kind: 'text', text: 'not a file' },
+            { targets: [file.envelope.id], revision: file.envelope.id }
+        );
+        await transmit(alice, edit, 'error');
+        bob.ws.close();
+        await once(bob.ws, 'close');
+        const rejoined = await f.join('Bob', bob.identity, bob.cookie);
+        assert.equal(
+            rejoined.packets.filter((p) => p.type === 'message').length,
+            1
+        );
+        await receivedParts(rejoined, 3, file.envelope.id);
+        const outsider = await f.join('Charlie');
+        outsider.ws.send(
+            JSON.stringify({ type: 'fetch', id: file.envelope.id })
+        );
+        await outsider.wait('error');
+        assert.equal(outsider.parts.length, 0, 'only recipients get parts');
         const deletion = await seal(
             alice.identity,
-            [alice.identity, bob.identity],
+            audience,
             f.app.boot,
             'room',
             'delete',
             { kind: 'delete' },
-            { targets: [envelope.id] }
+            { targets: [file.envelope.id] }
         );
         await transmit(alice, deletion);
         assert.equal(f.app.stats().historyBytes, 0);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('interrupted, cleared, oversized and out-of-order uploads release RAM without leaking parts', async () => {
+    const f = await fixture();
+    try {
+        let alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const audience = [alice.identity, bob.identity];
+        const data = new Uint8Array(PART_BYTES * 2 + 10).fill(7);
+        const file = await fileMessage(
+            alice.identity,
+            audience,
+            f.app.boot,
+            data
+        );
+        const prior = config.maxHistoryBytes;
+        config.maxHistoryBytes = 2 * PART_BYTES;
+        try {
+            await transmit(alice, file.envelope, 'error');
+        } finally {
+            config.maxHistoryBytes = prior;
+        }
+        assert.equal(f.app.stats().messages, 0);
+
+        alice.ws.send(
+            JSON.stringify({ type: 'envelope', envelope: file.envelope })
+        );
+        alice.ws.send(file.frames[0]);
+        await alice.wait('progress');
+        alice.ws.close();
+        await once(alice.ws, 'close');
+        assert.deepEqual(
+            [f.app.stats().messages, f.app.stats().historyBytes],
+            [0, 0],
+            'an interrupted upload is dropped'
+        );
+        alice = await f.join('Alice', alice.identity, alice.cookie);
+        await upload(alice, file);
+        await delivered(bob);
+        await receivedParts(bob, 3, file.envelope.id);
+
+        const cleared = await fileMessage(
+            alice.identity,
+            audience,
+            f.app.boot,
+            data
+        );
+        alice.ws.send(
+            JSON.stringify({ type: 'envelope', envelope: cleared.envelope })
+        );
+        alice.ws.send(cleared.frames[0]);
+        await alice.wait('progress');
+        bob.ws.send(
+            JSON.stringify({
+                type: 'clear',
+                id: crypto.randomUUID(),
+                scope: 'room',
+            })
+        );
+        await bob.wait('ack');
+        assert.equal(f.app.stats().historyBytes, 0);
+        alice.ws.send(cleared.frames[1]); // Parts still in flight are ignored.
+        const replay = await transmit(alice, cleared.envelope);
+        assert.ok(replay.type === 'ack' && replay.deleted);
+        assert.equal(f.app.stats().messages, 0);
+        assert.equal(
+            bob.packets.some((p) => p.type === 'message'),
+            false
+        );
+        assert.equal(bob.parts.length, 0);
+
+        const shuffled = await fileMessage(
+            alice.identity,
+            audience,
+            f.app.boot,
+            data
+        );
+        alice.ws.send(
+            JSON.stringify({ type: 'envelope', envelope: shuffled.envelope })
+        );
+        alice.ws.send(shuffled.frames[1]);
+        const [code] = await once(alice.ws, 'close');
+        assert.equal(code, 1008);
+        for (let i = 0; i < 100 && f.app.stats().historyBytes; i++)
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        assert.equal(f.app.stats().historyBytes, 0);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('calls admit only their members, bound transports and media, and refuse malformed MLS packets', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const charlie = await f.join('Charlie');
+        const dm = dmScope(alice.identity.id, bob.identity.id);
+        let next = 0;
+        async function media(
+            person: typeof alice,
+            body: Record<string, unknown>
+        ) {
+            const request = ++next;
+            person.ws.send(JSON.stringify({ type: 'media', request, ...body }));
+            for (;;) {
+                const reply = await person.wait('media');
+                if (reply.type === 'media' && reply.request === request)
+                    return reply;
+            }
+        }
+        assert.equal(
+            (await media(alice, { action: 'setup' })).error,
+            'Join the call first.'
+        );
+        alice.ws.send(JSON.stringify({ type: 'call', scope: dm }));
+        const setup = await media(alice, { action: 'setup' });
+        const codecs = (
+            setup.data as {
+                rtpCapabilities: { codecs: { mimeType: string }[] };
+            }
+        ).rtpCapabilities.codecs.map((codec) => codec.mimeType);
+        assert.ok(
+            codecs.includes('audio/opus') && codecs.includes('video/VP8')
+        );
+        const transport = (await media(alice, {
+            action: 'transport',
+            direction: 'send',
+        })) as { data: { iceCandidates: { address: string; port: number }[] } };
+        assert.ok(
+            transport.data.iceCandidates.every(
+                (c) => c.address === '127.0.0.1' && c.port > 0
+            )
+        );
+        assert.equal(
+            (await media(alice, { action: 'transport', direction: 'send' }))
+                .error,
+            'Invalid transport.'
+        );
+        assert.equal(
+            (
+                await media(alice, {
+                    action: 'consume',
+                    producer: randomUUID(),
+                    rtpCapabilities: {},
+                })
+            ).error,
+            'Unknown transport.'
+        );
+
+        // Only the two DM participants can join a DM call.
+        charlie.ws.send(JSON.stringify({ type: 'call', scope: dm }));
+        const [code] = await once(charlie.ws, 'close');
+        assert.equal(code, 1008);
+
+        // MLS packets are bounded and validated before they reach a leader.
+        bob.ws.send(JSON.stringify({ type: 'call', scope: dm }));
+        bob.ws.send(
+            JSON.stringify({
+                type: 'mls',
+                scope: dm,
+                action: 'key-package',
+                version: 'not-a-uuid',
+                keyPackage: 'AAAA',
+            })
+        );
+        const [bobCode] = await once(bob.ws, 'close');
+        assert.equal(bobCode, 1008);
+        alice.ws.send(JSON.stringify({ type: 'call', scope: null }));
+        assert.equal(
+            (await media(alice, { action: 'setup' })).error,
+            'Join the call first.'
+        );
     } finally {
         await f.app.close();
     }

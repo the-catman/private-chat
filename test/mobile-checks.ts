@@ -116,7 +116,7 @@ export async function checkMobileLayout(page: Page, peer: Page, touch = false) {
     const fileChooser = page.waitForEvent('filechooser');
     await page
         .getByRole('menuitem', {
-            name: 'Attach file (up to 5 MB)',
+            name: 'Attach file (up to 256 MB)',
             exact: true,
         })
         .click();

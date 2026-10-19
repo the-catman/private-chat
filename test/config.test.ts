@@ -33,3 +33,25 @@ test('configuration rejects origins with HTTP, credentials, paths or queries', (
             /APP_ORIGIN must be an HTTPS origin without a path/
         );
 });
+
+test('media settings default to every interface and reject invalid addresses', () => {
+    const base = {
+        APP_PASSWORD: password,
+        APP_ORIGIN: 'https://chat.example.com',
+    };
+    const config = readConfig(base);
+    assert.equal(config.mediaPort, 44444);
+    assert.equal(config.mediaListenIp, '0.0.0.0');
+    assert.equal(config.mediaAddress, '');
+    assert.equal(
+        readConfig({ ...base, MEDIA_ANNOUNCED_ADDRESS: 'media.example.com' })
+            .mediaAddress,
+        'media.example.com'
+    );
+    for (const env of [
+        { MEDIA_LISTEN_IP: 'everywhere' },
+        { MEDIA_ANNOUNCED_ADDRESS: 'https://media.example.com' },
+        { MEDIA_PORT: '70000' },
+    ])
+        assert.throws(() => readConfig({ ...base, ...env }), /Invalid MEDIA/);
+});

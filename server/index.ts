@@ -22,7 +22,7 @@ try {
         );
         if (development)
             console.log(
-                'Vite is watching frontend changes. Restart for backend or .env changes.'
+                'Frontend changes hot-reload. Backend or .env changes restart the server, which clears RAM history.'
             );
         console.log(
             'Messages stay in application memory until shutdown. No message files, database, or message logs.'

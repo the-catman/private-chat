@@ -1,5 +1,5 @@
 import type { Content } from '../types';
-import { MAX_FILE_BYTES } from './limits';
+import { MAX_FILE_BYTES, partCount } from './limits';
 
 export function validateContent(value: unknown): Content {
     if (!value || typeof value !== 'object')
@@ -24,12 +24,15 @@ export function validateContent(value: unknown): Content {
         return payload;
     if (
         payload.kind === 'file' &&
-        typeof payload.data === 'string' &&
         Number.isSafeInteger(payload.size) &&
         payload.size >= 0 &&
         payload.size <= MAX_FILE_BYTES &&
-        payload.data.length === Math.ceil((payload.size * 4) / 3) &&
-        /^[A-Za-z0-9_-]*$/.test(payload.data) &&
+        Array.isArray(payload.hashes) &&
+        payload.hashes.length === partCount(payload.size) &&
+        payload.hashes.every(
+            (hash) =>
+                typeof hash === 'string' && /^[A-Za-z0-9_-]{43}$/.test(hash)
+        ) &&
         typeof payload.name === 'string' &&
         payload.name.length > 0 &&
         payload.name.length <= 255 &&

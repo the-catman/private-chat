@@ -251,7 +251,11 @@ export async function checkCallLayoutAndNoise(alice: Page, bob: Page) {
     assert.equal(
         await bob.evaluate(() =>
             window.__testPeers
-                .filter((pc) => pc.connectionState === 'connected')
+                .filter(
+                    (pc) =>
+                        pc.connectionState === 'connected' &&
+                        pc.getSenders().some((sender) => sender.track)
+                )
                 .every((pc) =>
                     pc
                         .getSenders()
@@ -375,6 +379,12 @@ export async function checkScreenAudioAndPopout(alice: Page, bob: Page) {
     await alice.evaluate(() => window.__testScreenContext!.close());
 
     const peersBefore = await alice.evaluate(() => window.__testPeers.length);
+    const connectedBefore = await alice.evaluate(
+        () =>
+            window.__testPeers.filter(
+                (pc) => pc.connectionState === 'connected'
+            ).length
+    );
     const socketsBefore = await alice.evaluate(
         () => window.__testSockets.length
     );
@@ -443,8 +453,9 @@ export async function checkScreenAudioAndPopout(alice: Page, bob: Page) {
                     (pc) => pc.connectionState === 'connected'
                 ).length
         ),
-        2
+        connectedBefore
     );
+    await expectConnected(alice, 3);
     assert.deepEqual(popupErrors, []);
     console.log(
         'PASS: screen-audio mute/unmute/track cleanup; pop-out capture and closing preserve the same call'
@@ -485,18 +496,7 @@ export async function checkFourPersonCall(pages: Page[]) {
     }
     const page = pages[0];
     await expect(page.locator('.video-tile')).toHaveCount(4);
-    await expect
-        .poll(
-            () =>
-                page.evaluate(
-                    () =>
-                        window.__testPeers.filter(
-                            (pc) => pc.connectionState === 'connected'
-                        ).length
-                ),
-            { timeout: 15000 }
-        )
-        .toBe(3);
+    for (const member of pages) await expectConnected(member, 4);
     for (const viewport of [
         { width: 720, height: 475 },
         { width: 320, height: 640 },
@@ -524,6 +524,47 @@ export async function checkFourPersonCall(pages: Page[]) {
             .click();
     for (const member of pages) await checkCaptureCleanup(member);
     console.log(
-        'PASS: four-person mesh at minimum panel height/mobile sizes; leaving from pop-out ends capture'
+        'PASS: four-person call at minimum panel height/mobile sizes; leaving from pop-out ends capture'
     );
+}
+
+// Every tile is in the call and holds the current MLS keys.
+export async function expectConnected(page: Page, people: number) {
+    await expect(
+        page.locator('.call-panel .video-tile:not(.waiting-tile)')
+    ).toHaveCount(people, { timeout: 15000 });
+    await expect(page.locator('.call-panel .connection-label')).toHaveCount(0, {
+        timeout: 15000,
+    });
+}
+
+function rtp(packet: Buffer) {
+    let offset = 12 + (packet[0] & 0x0f) * 4;
+    if (packet[0] & 0x10) offset += 4 + packet.readUInt16BE(offset + 2) * 4;
+    const end =
+        packet[0] & 0x20 ? packet.length - packet.at(-1)! : packet.length;
+    return {
+        marker: (packet[1] & 0x80) !== 0,
+        payload: packet.subarray(offset, Math.max(offset, end)),
+    };
+}
+
+// What the SFU forwards: Opus frames and the end of every VP8 frame carry a
+// DAVE trailer, so the server only ever handles ciphertext.
+export async function checkEncryptedMedia(app: {
+    calls: {
+        inspect(scope: string): Promise<{ source: string; packet: Buffer }[]>;
+    };
+}) {
+    const packets = (await app.calls.inspect('room'))
+        .map(({ source, packet }) => ({ source, ...rtp(packet) }))
+        .filter((p) => p.payload.length);
+    const audio = packets.filter((p) => p.source === 'mic');
+    const video = packets.filter((p) => p.source === 'camera' && p.marker);
+    assert.ok(
+        audio.length > 20 && video.length > 3,
+        `Expected forwarded media, saw ${audio.length} audio and ${video.length} video frames.`
+    );
+    for (const p of [...audio, ...video])
+        assert.deepEqual([...p.payload.subarray(-2)], [0xfa, 0xfa]);
 }

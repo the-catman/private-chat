@@ -2,12 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ChatClient } from '../src/lib/client';
 import {
-    createIdentity,
     seal,
+    open,
     contentKey,
     b64,
     dmScope,
+    partHashes,
 } from '../src/lib/crypto';
+import { createIdentity } from './identities';
+import { Ratchet, RatchetError } from '../src/lib/signal';
+import { PART_BYTES } from '../src/lib/limits';
 import type { ClientPacket, Identity, Envelope } from '../src/types';
 import type { SoundCue } from '../src/lib/sounds';
 
@@ -33,9 +37,6 @@ function clientFor(
         config: {
             boot,
             maxClients: 4,
-            iceServers: [],
-            hasTurn: false,
-            relayOnly: false,
             expires: Date.now() + 60000,
         },
     });
@@ -86,7 +87,11 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
         envelope: inFlight,
         received: 3,
     });
-    const outgoing = client.send({ kind: 'text', text: 'Still encrypting' });
+    // Observe the rejection now; it may settle before the decryption below.
+    const outgoing = assert.rejects(
+        client.send({ kind: 'text', text: 'Still encrypting' }),
+        /conversation was cleared/
+    );
     const marker = {
         type: 'cleared' as const,
         id: crypto.randomUUID(),
@@ -95,7 +100,7 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
     };
     await client.receive(marker);
     await incoming;
-    await assert.rejects(outgoing, /conversation was cleared/);
+    await outgoing;
     assert.deepEqual(
         client.state.messages.map((m) => m.id),
         [dm.id]
@@ -362,14 +367,17 @@ test('signing out cancels in-flight encryption and decryption without restoring 
         createIdentity(),
     ]);
     const boot = crypto.randomUUID();
+    const bytes = new Uint8Array(8192);
     const file = {
         kind: 'file' as const,
-        data: b64(new Uint8Array(8192)),
+        hashes: await partHashes(bytes),
         size: 8192,
         mime: 'application/octet-stream',
         name: 'synthetic.dat',
     };
-    const packet = await seal(alice, [alice, bob], boot, 'room', 'chat', file);
+    const packet = await seal(alice, [alice, bob], boot, 'room', 'chat', file, {
+        parts: 1,
+    });
     const receiver = clientFor(bob, [alice, bob], boot);
     const incoming = receiver.client.receive({
         type: 'message',
@@ -381,10 +389,168 @@ test('signing out cancels in-flight encryption and decryption without restoring 
     assert.equal(receiver.client.state.phase, 'login');
     assert.deepEqual(receiver.client.state.messages, []);
     const sender = clientFor(alice, [alice, bob], boot);
-    const outgoing = sender.client.send(file);
+    const outgoing = sender.client.send(file, 'room', bytes);
     await sender.client.logout();
     await assert.rejects(outgoing, /connection changed/);
     assert.equal(sender.client.pending.size, 0);
     assert.deepEqual(sender.client.state.messages, []);
     assert.deepEqual(sender.sent, []);
+});
+
+test('file parts upload within an ack window, then decrypt, verify and assemble for recipients', async () => {
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const sender = clientFor(alice, [alice, bob], boot);
+    const frames: Uint8Array<ArrayBuffer>[] = [];
+    const ws = { readyState: WebSocket.OPEN } as WebSocket;
+    sender.client.ws = ws;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    sender.client.wire = (packet: ClientPacket) => {
+        if (packet.type === 'envelope') sender.sent.push(packet.envelope);
+    };
+    sender.client.wirePart = (frame) => {
+        frames.push(frame);
+        maxInFlight = Math.max(maxInFlight, ++inFlight);
+        // Acknowledge asynchronously, as the relay does after storing a part.
+        setTimeout(() => {
+            inFlight--;
+            const id = sender.sent[0].id;
+            void sender.client.receive(
+                frames.length === sender.sent[0].parts
+                    ? { type: 'ack', id }
+                    : { type: 'progress', id, parts: frames.length }
+            );
+        }, 1);
+    };
+    const data = new Uint8Array(PART_BYTES * 9 + 5).map((_, i) => i % 199);
+    const payload = {
+        kind: 'file' as const,
+        name: 'synthetic.bin',
+        mime: 'application/octet-stream',
+        size: data.length,
+        hashes: await partHashes(data),
+    };
+    await assert.rejects(
+        sender.client.send(payload, 'room', data.slice(1)),
+        /changed/
+    );
+    await sender.client.send(payload, 'room', data);
+    for (let i = 0; i < 500 && sender.client.pending.size; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(frames.length, 10);
+    assert.ok(maxInFlight <= 8, 'uploads wait for progress acks');
+    assert.equal(sender.client.state.messages[0].status, 'sent');
+    assert.equal(sender.client.state.messages[0].bytes, data);
+
+    const receiver = clientFor(bob, [alice, bob], boot);
+    await receiver.client.receive({
+        type: 'message',
+        envelope: sender.sent[0],
+        received: 1,
+    });
+    const receive = (frame: Uint8Array<ArrayBuffer>) =>
+        (
+            receiver.client as unknown as {
+                receivePart(frame: Uint8Array<ArrayBuffer>): Promise<void>;
+            }
+        ).receivePart(frame);
+    const fetched: ClientPacket[] = [];
+    receiver.client.wire = (packet) => void fetched.push(packet);
+    // Files above the auto-download size wait until someone opens them.
+    assert.equal(receiver.client.state.messages[0].progress, undefined);
+    receiver.client.fetchFile(receiver.client.state.messages[0].id);
+    assert.deepEqual(fetched, [{ type: 'fetch', id: sender.sent[0].id }]);
+    assert.equal(receiver.client.state.messages[0].progress, 0);
+    assert.equal(receiver.client.state.messages[0].bytes, undefined);
+    for (const frame of frames.slice(0, 5)) await receive(frame);
+    assert.equal(receiver.client.state.messages[0].progress, 0.5);
+    for (const frame of frames.slice(5)) await receive(frame);
+    const message = receiver.client.state.messages[0];
+    assert.equal(message.progress, undefined);
+    assert.deepEqual(message.bytes, data);
+
+    // A part replayed from another file is rejected and marks it unavailable.
+    const other = clientFor(bob, [alice, bob], boot);
+    await other.client.receive({
+        type: 'message',
+        envelope: sender.sent[0],
+        received: 1,
+    });
+    other.client.wire = () => {};
+    other.client.fetchFile(sender.sent[0].id);
+    const forged = frames[1].slice();
+    forged.set(frames[0].subarray(0, 40));
+    await assert.rejects(
+        (
+            other.client as unknown as {
+                receivePart(frame: Uint8Array<ArrayBuffer>): Promise<void>;
+            }
+        ).receivePart(forged)
+    );
+    assert.equal(other.client.state.messages[0].unavailable, true);
+    assert.equal(other.client.state.messages[0].bytes, undefined);
+});
+
+test('a browser that lost its Signal sessions starts a new one and reads new messages', async () => {
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const text = (text: string) => ({ kind: 'text' as const, text });
+    await open(
+        alice,
+        bob,
+        boot,
+        await seal(bob, [alice, bob], boot, 'room', 'chat', text('hello'))
+    );
+    await open(
+        bob,
+        alice,
+        boot,
+        await seal(alice, [alice, bob], boot, 'room', 'chat', text('hi'))
+    );
+    // Bob's browser storage is cleared; Alice still uses the old session.
+    const fetch = bob.ratchet.fetch;
+    bob.ratchet = new Ratchet(bob);
+    bob.ratchet.fetch = fetch;
+    const { client, sent } = clientFor(bob, [alice, bob], boot);
+    const [lost, later] = await Promise.all(
+        ['lost', 'later'].map((body) =>
+            seal(alice, [alice, bob], boot, 'room', 'chat', text(body))
+        )
+    );
+    await assert.rejects(
+        client.receive({ type: 'message', envelope: lost, received: 1 }),
+        RatchetError
+    );
+    for (let i = 0; i < 100 && !sent.length; i++)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    const [rekey] = sent;
+    assert.equal(rekey?.type, 'signal');
+    assert.deepEqual(await open(alice, bob, boot, rekey), { rekey: true });
+    const fresh = await seal(
+        alice,
+        [alice, bob],
+        boot,
+        'room',
+        'chat',
+        text('back')
+    );
+    await client.receive({ type: 'message', envelope: fresh, received: 2 });
+    assert.deepEqual(
+        client.state.messages.map((m) => m.payload),
+        [text('back')]
+    );
+    // A second failure soon after does not send another rekey.
+    await assert.rejects(
+        client.receive({ type: 'message', envelope: later, received: 3 }),
+        RatchetError
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(sent.length, 1);
 });

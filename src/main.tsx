@@ -7,7 +7,7 @@ import React, {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChatClient } from './lib/client';
-import { b64, unb64, dmScope, safetyCode } from './lib/crypto';
+import { b64, unb64, dmScope, safetyCode, partHashes } from './lib/crypto';
 import { Icon } from './Icon';
 import type { Peer, ChatState, Content, Message } from './types';
 import { Avatar, IconButton, color, minutes } from './components/Common';
@@ -385,7 +385,14 @@ function ChatMessage({
                 ) : message.payload.kind === 'voice' ? (
                     <VoiceNote content={message.payload} />
                 ) : message.payload.kind === 'file' ? (
-                    <FileAttachment content={message.payload} />
+                    <FileAttachment
+                        content={message.payload}
+                        bytes={message.bytes}
+                        progress={message.progress}
+                        sending={message.status === 'sending'}
+                        unavailable={message.unavailable}
+                        fetch={() => client.fetchFile(message.id)}
+                    />
                 ) : (
                     <MarkdownMessage text={message.payload.text} />
                 )}
@@ -518,7 +525,7 @@ function Composer({
     const attach = (picked?: File) => {
         if (!picked) return;
         if (picked.size > MAX_FILE_BYTES) {
-            client.notify('Files can be up to 5 MB. Choose a smaller file.');
+            client.notify('Files can be up to 256 MB. Choose a smaller file.');
             return;
         }
         setFile(picked);
@@ -686,16 +693,19 @@ function Composer({
             input.current?.focus({ preventScroll: true });
         }
         try {
-            const payload: Content = file
+            const bytes = file
+                ? new Uint8Array(await file.arrayBuffer())
+                : undefined;
+            const payload: Content = bytes
                 ? {
                       kind: 'file',
-                      data: b64(await file.arrayBuffer()),
-                      name: file.name.slice(0, 255) || 'attachment',
-                      mime: file.type.slice(0, 128),
-                      size: file.size,
+                      name: file!.name.slice(0, 255) || 'attachment',
+                      mime: file!.type.slice(0, 128),
+                      size: bytes.length,
+                      hashes: await partHashes(bytes),
                   }
                 : voice || { kind: 'text', text: replaceEmoji(text.trim()) };
-            await client.send(payload, scope);
+            await client.send(payload, scope, bytes);
             if (file) setFile((current) => (current === file ? null : current));
             else if (voice)
                 setVoice((current) => (current === voice ? null : current));
@@ -972,7 +982,7 @@ function Composer({
                                     <>
                                         <IconButton
                                             icon="attach"
-                                            label="Attach file (up to 5 MB)"
+                                            label="Attach file (up to 256 MB)"
                                             disabled={
                                                 offline ||
                                                 Boolean(voice) ||
@@ -1101,7 +1111,7 @@ function Composer({
                     }}
                     actions={[
                         {
-                            label: 'Attach file (up to 5 MB)',
+                            label: 'Attach file (up to 256 MB)',
                             icon: 'attach',
                             disabled:
                                 Boolean(voice) || (sending && Boolean(file)),
@@ -1223,11 +1233,12 @@ function ModalView({
                             <div>
                                 <strong>Your conversations, your keys.</strong>
                                 <p>
-                                    Only intended recipients can decrypt
-                                    messages. A new arrival can read messages
-                                    sent after they join, plus any room history
-                                    an existing member explicitly shares with
-                                    them.
+                                    Messages use the Signal protocol: each has
+                                    its own key, and only intended recipients
+                                    can decrypt it. A new arrival can read
+                                    messages sent after they join, plus any room
+                                    history an existing member explicitly shares
+                                    with them.
                                 </p>
                             </div>
                         </div>
@@ -1245,12 +1256,12 @@ function ModalView({
                         <div className="privacy-row">
                             <Icon name="video" />
                             <div>
-                                <strong>Calls between browsers.</strong>
+                                <strong>Calls sealed end to end.</strong>
                                 <p>
                                     Voice, video, and screen sharing are
-                                    encrypted. Calls aren’t recorded. A relay,
-                                    if configured, only forwards encrypted
-                                    media.
+                                    encrypted with keys only the people in the
+                                    call hold. The server forwards media it
+                                    can’t decrypt. Calls aren’t recorded.
                                 </p>
                             </div>
                         </div>

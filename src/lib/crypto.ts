@@ -1,8 +1,17 @@
-import type { Identity, Bundle, Recipient, Envelope } from '../types';
+import type {
+    Identity,
+    Bundle,
+    Recipient,
+    Envelope,
+    RatchetKey,
+    SelfKey,
+} from '../types';
+import { PART_BYTES, PART_HEADER, partCount } from './limits.ts';
+import { Ratchet } from './signal.ts';
 // Browser-native primitives. The relay never receives private keys or plaintext.
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-export const VERSION = 2;
+export const VERSION = 3;
 export const b64 = (bytes: ArrayBuffer | Uint8Array) => {
     let value = '';
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -29,22 +38,21 @@ export async function identityId(bundle: Bundle) {
     );
 }
 
+// X25519 for key agreement and Ed25519 for signatures, as in Signal.
 export async function createIdentity(): Promise<Identity> {
-    const dh = await crypto.subtle.generateKey(
-        { name: 'ECDH', namedCurve: 'P-256' },
-        false,
-        ['deriveBits']
-    );
-    const sign = await crypto.subtle.generateKey(
-        { name: 'ECDSA', namedCurve: 'P-256' },
-        false,
-        ['sign', 'verify']
-    );
+    const dh = (await crypto.subtle.generateKey({ name: 'X25519' }, false, [
+        'deriveBits',
+    ])) as CryptoKeyPair;
+    const sign = (await crypto.subtle.generateKey({ name: 'Ed25519' }, false, [
+        'sign',
+        'verify',
+    ])) as CryptoKeyPair;
     const bundle = {
         dh: b64(await crypto.subtle.exportKey('raw', dh.publicKey)),
         sign: b64(await crypto.subtle.exportKey('raw', sign.publicKey)),
     };
-    return { dh, sign, bundle, id: await identityId(bundle) };
+    const identity = { dh, sign, bundle, id: await identityId(bundle) };
+    return { ...identity, ratchet: new Ratchet(identity) };
 }
 
 function database() {
@@ -65,7 +73,7 @@ function database() {
 export async function loadIdentity(): Promise<Identity> {
     const db = await database();
     try {
-        const identity = await new Promise<Identity | undefined>(
+        const stored = await new Promise<Omit<Identity, 'ratchet'> | undefined>(
             (resolve, reject) => {
                 const request = db
                     .transaction('keys')
@@ -75,11 +83,14 @@ export async function loadIdentity(): Promise<Identity> {
                 request.onerror = () => reject(request.error);
             }
         );
-        if (identity) return identity;
+        // Older P-256 identities are replaced, which changes safety codes once.
+        if (stored?.sign.privateKey.algorithm.name === 'Ed25519')
+            return { ...stored, ratchet: new Ratchet(stored) };
         const fresh = await createIdentity();
         await new Promise<void>((resolve, reject) => {
             const tx = db.transaction('keys', 'readwrite');
-            tx.objectStore('keys').put(fresh, 'identity');
+            const { ratchet: _, ...keys } = fresh;
+            tx.objectStore('keys').put(keys, 'identity');
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -89,10 +100,10 @@ export async function loadIdentity(): Promise<Identity> {
     }
 }
 
-export async function sign(identity: Identity, text: string) {
+export async function sign(identity: Pick<Identity, 'sign'>, text: string) {
     return b64(
         await crypto.subtle.sign(
-            { name: 'ECDSA', hash: 'SHA-256' },
+            'Ed25519',
             identity.sign.privateKey,
             enc.encode(text)
         )
@@ -103,12 +114,12 @@ export async function verify(bundle: Bundle, text: string, signature: string) {
         const key = await crypto.subtle.importKey(
             'raw',
             unb64(bundle.sign),
-            { name: 'ECDSA', namedCurve: 'P-256' },
+            'Ed25519',
             false,
             ['verify']
         );
         return await crypto.subtle.verify(
-            { name: 'ECDSA', hash: 'SHA-256' },
+            'Ed25519',
             key,
             unb64(signature),
             enc.encode(text)
@@ -117,6 +128,8 @@ export async function verify(bundle: Bundle, text: string, signature: string) {
         return false;
     }
 }
+export const prekeyText = (key: string) =>
+    JSON.stringify(['hush-prekey-v1', key]);
 export const proofText = (
     origin: string,
     boot: string,
@@ -137,48 +150,34 @@ export const aadText = (m: Envelope) =>
         m.time,
         m.targets ?? null,
         m.revision ?? null,
+        // Older message shapes keep their exact authenticated data.
+        ...(m.parts === undefined ? [] : [m.parts]),
     ]);
+// The author's entry is a self key; everyone else gets a ratchet message.
+const entryText = (m: Envelope, id: string) => {
+    if (id === m.from) {
+        const e = m.keys[id] as SelfKey;
+        return [e.iv, e.data];
+    }
+    const e = m.keys[id] as RatchetKey;
+    return [
+        e.dh,
+        e.pn,
+        e.n,
+        e.data,
+        e.pre ? [e.pre.ek, e.pre.spk, e.pre.opk ?? null] : null,
+    ];
+};
 export const signedText = (m: Envelope) =>
     JSON.stringify([
         aadText(m),
         m.iv,
         m.data,
-        Object.entries(m.keys).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        Object.keys(m.keys)
+            .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+            .map((id) => [id, entryText(m, id)]),
     ]);
-
-async function pairKey(identity: Identity, peer: Recipient, boot: string) {
-    if ((await identityId(peer.bundle)) !== peer.id)
-        throw new Error('Invalid participant identity.');
-    const publicKey = await crypto.subtle.importKey(
-        'raw',
-        unb64(peer.bundle.dh),
-        { name: 'ECDH', namedCurve: 'P-256' },
-        false,
-        []
-    );
-    const bits = await crypto.subtle.deriveBits(
-        { name: 'ECDH', public: publicKey },
-        identity.dh.privateKey,
-        256
-    );
-    const material = await crypto.subtle.importKey('raw', bits, 'HKDF', false, [
-        'deriveKey',
-    ]);
-    return crypto.subtle.deriveKey(
-        {
-            name: 'HKDF',
-            hash: 'SHA-256',
-            salt: enc.encode(boot),
-            info: enc.encode(
-                `hush-wrap-v1:${[identity.id, peer.id].sort().join(':')}`
-            ),
-        },
-        material,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['encrypt', 'decrypt']
-    );
-}
+const keyContext = (m: Envelope, id: string) => `${aadText(m)}:${id}`;
 
 export async function seal(
     identity: Identity,
@@ -187,7 +186,7 @@ export async function seal(
     scope: string,
     type: Envelope['type'],
     payload: unknown,
-    operation: { targets?: string[]; revision?: string } = {}
+    operation: { targets?: string[]; revision?: string; parts?: number } = {}
 ): Promise<Envelope> {
     const raw = crypto.getRandomValues(new Uint8Array(32));
     try {
@@ -220,20 +219,20 @@ export async function seal(
                 enc.encode(JSON.stringify(payload))
             )
         );
-        for (const peer of peers) {
-            if (m.keys[peer.id]) continue;
-            const iv = crypto.getRandomValues(new Uint8Array(12));
-            const wrapped = await crypto.subtle.encrypt(
-                {
-                    name: 'AES-GCM',
-                    iv,
-                    additionalData: enc.encode(`${aadText(m)}:${peer.id}`),
-                },
-                await pairKey(identity, peer, boot),
-                raw
-            );
-            m.keys[peer.id] = { iv: b64(iv), data: b64(wrapped) };
-        }
+        const unique = new Map(peers.map((peer) => [peer.id, peer]));
+        unique.set(identity.id, identity);
+        const entries = await Promise.all(
+            Array.from(unique.values(), async (peer) => {
+                const context = keyContext(m, peer.id);
+                return [
+                    peer.id,
+                    peer.id === identity.id
+                        ? await identity.ratchet.lock(raw, context)
+                        : await identity.ratchet.seal(peer, raw, context),
+                ] as const;
+            })
+        );
+        m.keys = Object.fromEntries(entries);
         m.sig = await sign(identity, signedText(m));
         return m;
     } finally {
@@ -259,18 +258,22 @@ export async function contentKey(
         !(await verify(sender.bundle, signedText(m), m.sig))
     )
         throw new Error('Message signature did not verify.');
-    const wrap = m.keys[identity.id];
-    return new Uint8Array(
-        await crypto.subtle.decrypt(
-            {
-                name: 'AES-GCM',
-                iv: unb64(wrap.iv),
-                additionalData: enc.encode(`${aadText(m)}:${identity.id}`),
-            },
-            await pairKey(identity, sender, boot),
-            unb64(wrap.data)
-        )
+    const context = keyContext(m, identity.id);
+    const entry = m.keys[identity.id];
+    if (m.from === identity.id)
+        return identity.ratchet.unlock(entry as SelfKey, context);
+    // A ratchet key opens once; history reads reuse the stored message key.
+    const known = identity.ratchet.recall(m.id, m.from);
+    if (known) return known;
+    const raw = await identity.ratchet.open(
+        sender,
+        entry as RatchetKey,
+        context
     );
+    if (raw.length !== 32) throw new Error('Invalid message key.');
+    if (!['signal', 'typing'].includes(m.type))
+        identity.ratchet.remember(m.id, m.from, m.scope, raw);
+    return raw;
 }
 
 // A history grant forwards only a content key. The original author's signed
@@ -318,6 +321,87 @@ export async function open<T = unknown>(
         raw.fill(0);
     }
 }
+
+// File parts use a key derived from the message key, so anyone who can open
+// the message (including history recipients) can open its parts. Each part is
+// also checked against the hash list inside the author's signed message.
+export async function partKey(raw: Uint8Array<ArrayBuffer>) {
+    const material = await crypto.subtle.importKey('raw', raw, 'HKDF', false, [
+        'deriveKey',
+    ]);
+    return crypto.subtle.deriveKey(
+        {
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(),
+            info: enc.encode('hush-parts-v1'),
+        },
+        material,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt', 'decrypt']
+    );
+}
+const partParams = (m: Envelope, index: number) => {
+    // The derived key is unique to one message, so a counter nonce is safe.
+    const iv = new Uint8Array(12);
+    new DataView(iv.buffer).setUint32(8, index);
+    return {
+        name: 'AES-GCM',
+        iv,
+        additionalData: enc.encode(`${aadText(m)}:part:${index}`),
+    };
+};
+export async function sealPart(
+    key: CryptoKey,
+    m: Envelope,
+    index: number,
+    bytes: Uint8Array<ArrayBuffer>
+) {
+    const data = new Uint8Array(
+        await crypto.subtle.encrypt(partParams(m, index), key, bytes)
+    );
+    const frame = new Uint8Array(PART_HEADER + data.length);
+    frame.set(enc.encode(m.id));
+    new DataView(frame.buffer).setUint32(36, index);
+    frame.set(data, PART_HEADER);
+    return frame;
+}
+export function readPart(frame: Uint8Array<ArrayBuffer>) {
+    if (frame.length < PART_HEADER + 16) throw new Error('Invalid file part.');
+    return {
+        id: dec.decode(frame.subarray(0, 36)),
+        index: new DataView(frame.buffer, frame.byteOffset).getUint32(36),
+        data: frame.subarray(PART_HEADER),
+    };
+}
+export async function openPart(
+    key: CryptoKey,
+    m: Envelope,
+    index: number,
+    data: Uint8Array<ArrayBuffer>,
+    hash: string
+) {
+    const bytes = new Uint8Array(
+        await crypto.subtle.decrypt(partParams(m, index), key, data)
+    );
+    if (b64(await crypto.subtle.digest('SHA-256', bytes)) !== hash)
+        throw new Error('A file part did not match its signed message.');
+    return bytes;
+}
+export const partHashes = async (bytes: Uint8Array<ArrayBuffer>) => {
+    const hashes: string[] = [];
+    for (let i = 0; i < partCount(bytes.length); i++)
+        hashes.push(
+            b64(
+                await crypto.subtle.digest(
+                    'SHA-256',
+                    bytes.subarray(i * PART_BYTES, (i + 1) * PART_BYTES)
+                )
+            )
+        );
+    return hashes;
+};
 
 export async function safetyCode(a: string, b: string) {
     const bytes = new Uint8Array(

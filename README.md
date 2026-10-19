@@ -15,6 +15,8 @@ npm run dev
 
 Open the address in `APP_ORIGIN`. It will not open on localhost.
 
+Calls go through the server: open port 44444 (`MEDIA_PORT`) for UDP and TCP to this machine.
+
 Project code: [MIT](LICENSE). [Third-party licenses](THIRD_PARTY_NOTICES.md).
 
 ## Note

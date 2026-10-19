@@ -4,6 +4,23 @@ export type Identity = {
     sign: CryptoKeyPair;
     bundle: Bundle;
     id: string;
+    // Signal sessions for this identity; never stored with the identity keys.
+    ratchet: import('./lib/signal').Ratchet;
+};
+export type SignedPrekey = { id: number; key: string; sig: string };
+export type Prekey = { id: number; key: string };
+export type PrekeyBundle = { spk: SignedPrekey; opk?: Prekey };
+export type Prekeys = { spk: SignedPrekey; opks: Prekey[] };
+// The author's own copy of a message key, sealed with a key kept in this browser.
+export type SelfKey = { iv: string; data: string };
+// A Double Ratchet message carrying a message key to one recipient.
+export type RatchetKey = {
+    dh: string;
+    pn: number;
+    n: number;
+    data: string;
+    // X3DH values, sent until the recipient first replies.
+    pre?: { ek: string; spk: number; opk?: number };
 };
 export type Recipient = { id: string; bundle: Bundle };
 export type Peer = Recipient & {
@@ -20,16 +37,24 @@ export type Envelope = {
     type: 'chat' | 'signal' | 'typing' | 'edit' | 'delete' | 'share';
     targets?: string[];
     revision?: string;
+    parts?: number;
     time: number;
     iv: string;
     data: string;
-    keys: Record<string, { iv: string; data: string }>;
+    keys: Record<string, SelfKey | RatchetKey>;
     sig: string;
 };
 export type Content =
     | { kind: 'text'; text: string }
     | { kind: 'voice'; audio: string; mime: string; duration: number }
-    | { kind: 'file'; data: string; name: string; mime: string; size: number };
+    | {
+          kind: 'file';
+          name: string;
+          mime: string;
+          size: number;
+          // SHA-256 of each plaintext part; the bytes arrive separately.
+          hashes: string[];
+      };
 export type Message = {
     id: string;
     from: string;
@@ -43,6 +68,10 @@ export type Message = {
     edited?: boolean;
     sharedBy?: string;
     historyGrant?: Envelope;
+    // File bytes stay in memory only. Progress is set while parts transfer.
+    bytes?: Uint8Array<ArrayBuffer>;
+    progress?: number;
+    unavailable?: boolean;
 };
 export type Presence = {
     id: string;
@@ -54,10 +83,8 @@ export type Presence = {
 export type SessionConfig = {
     boot: string;
     maxClients: number;
-    iceServers: RTCIceServer[];
-    relayOnly: boolean;
-    hasTurn: boolean;
     expires: number;
+    protocol?: number;
 };
 export type MediaKind = 'mic' | 'camera' | 'screen' | 'system';
 export type MediaState = {
@@ -85,12 +112,69 @@ export type CallState = MediaState & {
         streams: Partial<Record<MediaKind, MediaStream>>;
     }[];
 };
-export type Signal = {
-    call: string;
-    description?: RTCSessionDescriptionInit;
-    candidate?: RTCIceCandidateInit;
-    media?: MediaState;
-};
+// Media state travels end-to-end encrypted, like any other DM envelope.
+export type Signal = { call: string; media?: MediaState };
+// The SFU forwards DAVE-encrypted frames; MLS gives each epoch its keys.
+export type MediaRequest =
+    | { action: 'setup' }
+    | { action: 'transport'; direction: 'send' | 'recv' }
+    | { action: 'connect'; transport: string; dtlsParameters: unknown }
+    | { action: 'restart'; transport: string }
+    | {
+          action: 'produce';
+          transport: string;
+          source: MediaKind;
+          kind: 'audio' | 'video';
+          rtpParameters: unknown;
+      }
+    | { action: 'close'; producer: string }
+    | { action: 'consume'; producer: string; rtpCapabilities: unknown }
+    | { action: 'resume'; consumer: string };
+export type MlsClientPacket =
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'key-package';
+          version: string;
+          keyPackage: string;
+      }
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'commit';
+          offer: number;
+          added: string[];
+          commit?: string;
+          welcome?: string;
+      };
+export type MlsServerPacket =
+    | { type: 'mls'; scope: string; action: 'create'; group: string }
+    | { type: 'mls'; scope: string; action: 'welcome'; welcome: string }
+    | { type: 'mls'; scope: string; action: 'commit'; commit: string }
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'sync';
+          offer: number;
+          add: { id: string; version: string; keyPackage: string }[];
+          remove: string[];
+      }
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'committed' | 'rejected';
+          offer: number;
+      }
+    | { type: 'mls'; scope: string; action: 'reset' };
+export type MediaEvent =
+    | {
+          type: 'producer';
+          scope: string;
+          producer: string;
+          member: string;
+          source: MediaKind;
+      }
+    | { type: 'producer-closed'; scope: string; producer: string };
 export type ChatState = {
     phase: 'loading' | 'login' | 'joining' | 'online' | 'reconnecting';
     name: string;
@@ -115,7 +199,13 @@ export type ServerPacket =
     | { type: 'access'; id: string; grant: Envelope }
     | { type: 'history-end' }
     | { type: 'ack'; id: string; deleted?: boolean }
+    | { type: 'progress'; id: string; parts: number }
     | { type: 'error'; id: string; message: string }
+    | { type: 'media'; request: number; data?: unknown; error?: string }
+    | { type: 'bundle'; request: number; bundle?: PrekeyBundle; error?: string }
+    | { type: 'prekeys'; remaining: number }
+    | MlsServerPacket
+    | MediaEvent
     | {
           type: 'message';
           envelope: Envelope;
@@ -124,7 +214,19 @@ export type ServerPacket =
           source?: { envelope: Envelope; received: number };
       };
 export type ClientPacket =
-    | { type: 'join'; id: string; bundle: Bundle; name: string; sig: string }
+    | {
+          type: 'join';
+          id: string;
+          bundle: Bundle;
+          name: string;
+          sig: string;
+          prekeys: Prekeys;
+      }
+    | { type: 'bundle'; request: number; id: string }
+    | ({ type: 'prekeys' } & Prekeys)
     | { type: 'call'; scope: string | null }
     | { type: 'clear'; id: string; scope: string }
+    | { type: 'fetch'; id: string }
+    | ({ type: 'media'; request: number } & MediaRequest)
+    | MlsClientPacket
     | { type: 'envelope'; envelope: Envelope };

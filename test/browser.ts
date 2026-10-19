@@ -31,6 +31,7 @@ import { observeSpeaking, checkSpeaking } from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
 import { checkMobileLayout } from './mobile-checks';
 import { checkUiChanges, checkPanelGestures } from './ui-checks';
+import { checkLargeFiles, checkDmImage } from './file-checks';
 import {
     checkParticipantVolume,
     checkMarkdown,
@@ -45,6 +46,8 @@ import {
     checkScreenAudioAndPopout,
     checkCaptureCleanup,
     checkFourPersonCall,
+    checkEncryptedMedia,
+    expectConnected,
 } from './call-checks';
 
 declare global {
@@ -60,7 +63,8 @@ const password = 'synthetic-test-password-for-browser-tests';
 const config = readConfig({
     APP_PASSWORD: password,
     APP_ORIGIN: 'https://127.0.0.1',
-    STUN_URLS: '',
+    MEDIA_PORT: '0',
+    MEDIA_LISTEN_IP: '127.0.0.1',
 });
 let app: ReturnType<typeof createChatServer>;
 const actualProject = process.env.TEST_DEV === 'project';
@@ -210,6 +214,139 @@ async function message(page: Page, text: string) {
     await expect(page.locator('.composer [role="textbox"]')).toBeFocused();
 }
 
+type Person = Awaited<ReturnType<typeof participant>>;
+async function checkVoiceNote(alice: Person, bob: Person) {
+    await checkAudioPreferences(alice.page);
+    await alice.page.getByRole('button', { name: 'Record voice note' }).click();
+    await expect(alice.page.locator('.recording-label')).toBeVisible();
+    await checkEnhancedReady(alice.page, 1);
+    await alice.page.waitForTimeout(1300);
+    await alice.page
+        .getByRole('button', { name: 'Finish', exact: true })
+        .click();
+    await expect(alice.page.locator('.voice-preview')).toBeVisible();
+    await checkCaptureCleanup(alice.page);
+    await alice.page
+        .getByRole('button', { name: 'Send message', exact: true })
+        .click();
+    await expect(bob.page.locator('.voice-note audio')).toHaveCount(1);
+    await bob.page
+        .locator('.voice-note audio')
+        .evaluate(async (audio: HTMLAudioElement) => {
+            await audio.play();
+        });
+    await expect
+        .poll(() =>
+            bob.page
+                .locator('.voice-note audio')
+                .evaluate((audio: HTMLAudioElement) => audio.readyState)
+        )
+        .toBeGreaterThanOrEqual(2);
+    console.log(
+        'PASS: record, encrypt, deliver, decrypt, and play a voice note'
+    );
+}
+async function checkCalls(alice: Person, bob: Person, charlie: Person) {
+    for (const p of [alice, bob, charlie])
+        await p.page
+            .getByRole('button', { name: 'The living room', exact: true })
+            .click();
+    await bob.page.evaluate(() => {
+        window.__testSyntheticMic = true;
+    });
+    await alice.page
+        .getByRole('button', { name: 'Start video call', exact: true })
+        .click();
+    await expect(
+        alice.page.getByRole('region', { name: 'Active call' })
+    ).toBeVisible();
+    await bob.page
+        .getByRole('button', { name: 'Start voice call', exact: true })
+        .click();
+    await expect(
+        bob.page.getByRole('region', { name: 'Active call' })
+    ).toBeVisible();
+    await charlie.page
+        .getByRole('button', { name: 'Start voice call', exact: true })
+        .click();
+    for (const p of [alice, bob, charlie]) {
+        await expectConnected(p.page, 3);
+        await expect
+            .poll(
+                () =>
+                    p.page.evaluate(async () => {
+                        let bytes = 0;
+                        for (const pc of window.__testPeers)
+                            for (const report of (await pc.getStats()).values())
+                                if (report.type === 'inbound-rtp')
+                                    bytes += Number(report.bytesReceived || 0);
+                        return bytes;
+                    }),
+                { timeout: 15000 }
+            )
+            .toBeGreaterThan(0);
+    }
+    await alice.page
+        .getByRole('button', { name: 'Mute microphone', exact: true })
+        .click();
+    await expect(
+        alice.page.getByRole('button', {
+            name: 'Unmute microphone',
+            exact: true,
+        })
+    ).toBeVisible();
+    await alice.page
+        .getByRole('button', { name: 'Turn camera off', exact: true })
+        .click();
+    await alice.page
+        .getByRole('button', { name: 'Turn camera on', exact: true })
+        .click();
+    try {
+        await expect(bob.page.locator('.video-tile video')).toHaveCount(1);
+    } catch (error) {
+        console.log(
+            'CALL DIAGNOSTICS',
+            await bob.page.evaluate(() => ({
+                notice: document.querySelector('.toast')?.textContent,
+                peers: window.__testPeers.map((pc) => ({
+                    status: pc.connectionState,
+                    tracks: pc.getTransceivers().map((t) => ({
+                        mid: t.mid,
+                        direction: t.currentDirection,
+                        kind: t.receiver.track.kind,
+                        state: t.receiver.track.readyState,
+                        muted: t.receiver.track.muted,
+                    })),
+                })),
+            }))
+        );
+        await bob.page.screenshot({ path: 'test-results/call-failure.png' });
+        throw error;
+    }
+    await alice.page.screenshot({ path: 'test-results/desktop-call.png' });
+    await checkEncryptedMedia(app);
+    console.log(
+        'PASS: three-person SFU call, DAVE-encrypted media at the server, mute, and camera toggles'
+    );
+
+    await checkSpeaking(alice.page, bob.page);
+    await checkParticipantVolume(alice.page, bob.page);
+    await checkCallLayoutAndNoise(alice.page, bob.page);
+    await checkScreenAudioAndPopout(alice.page, bob.page);
+    for (const p of [alice, bob, charlie])
+        await p.page
+            .getByRole('button', { name: 'Leave', exact: true })
+            .click();
+    assert.equal(
+        await alice.page.evaluate(() =>
+            window.__testPeers.some((pc) => pc.connectionState !== 'closed')
+        ),
+        false
+    );
+    for (const p of [alice, bob, charlie]) await checkCaptureCleanup(p.page);
+    console.log('PASS: screen-share start/stop, call teardown');
+}
+
 async function run() {
     const alice = await participant('Alice');
     const bob = await participant('Bob');
@@ -238,6 +375,28 @@ async function run() {
     }
     if (process.env.TEST_COMPOSER === '1') {
         await checkComposerFocus(alice.page);
+        assert.deepEqual(errors, []);
+        return;
+    }
+    if (process.env.TEST_FILES === '1') {
+        await checkLargeFiles(alice.page, bob.page, dir);
+        await checkDmImage(alice.page, bob.page);
+        assert.deepEqual(errors, []);
+        console.log(
+            'PASS: large files, on-demand download, reload and DM images'
+        );
+        return;
+    }
+    if (process.env.TEST_CALLS === '1') {
+        await checkVoiceNote(alice, bob);
+        await checkCalls(alice, bob, charlie);
+        const dave = await participant('Dave');
+        await checkFourPersonCall([
+            alice.page,
+            bob.page,
+            charlie.page,
+            dave.page,
+        ]);
         assert.deepEqual(errors, []);
         return;
     }
@@ -442,6 +601,37 @@ async function run() {
         'PASS: three-person room chat, private DMs, ciphertext-only WebSocket traffic'
     );
 
+    // Several parts exercise upload windows, relay streaming and reassembly.
+    const large = Buffer.alloc(2.5 * 1024 * 1024);
+    for (let i = 0; i < large.length; i++) large[i] = (i * 7) % 251;
+    await alice.page.getByLabel('Choose attachment').setInputFiles({
+        name: 'synthetic-large.bin',
+        mimeType: 'application/octet-stream',
+        buffer: large,
+    });
+    await alice.page
+        .getByRole('button', { name: 'Send message', exact: true })
+        .click();
+    const largeLink = bob.page.getByRole('link', {
+        name: 'Download synthetic-large.bin',
+        exact: true,
+    });
+    await expect(largeLink).toBeVisible();
+    const largeDownload = bob.page.waitForEvent('download');
+    await largeLink.click();
+    const largeChunks: Buffer[] = [];
+    for await (const chunk of await (await largeDownload).createReadStream())
+        largeChunks.push(Buffer.from(chunk));
+    assert.ok(Buffer.concat(largeChunks).equals(large));
+    assert.equal(
+        await charlie.page.evaluate(() =>
+            window.__testTraffic.some((frame) => frame.startsWith('[object'))
+        ),
+        false,
+        'file parts only reach DM participants'
+    );
+    console.log('PASS: multi-part encrypted file transfer in a DM');
+
     await alice.page
         .getByRole('button', { name: 'Settings', exact: true })
         .click();
@@ -478,144 +668,8 @@ async function run() {
         'PASS: matching safety codes, browser key persistence, refresh restores history'
     );
 
-    await checkAudioPreferences(alice.page);
-    await alice.page.getByRole('button', { name: 'Record voice note' }).click();
-    await expect(alice.page.locator('.recording-label')).toBeVisible();
-    await checkEnhancedReady(alice.page, 1);
-    await alice.page.waitForTimeout(1300);
-    await alice.page
-        .getByRole('button', { name: 'Finish', exact: true })
-        .click();
-    await expect(alice.page.locator('.voice-preview')).toBeVisible();
-    await checkCaptureCleanup(alice.page);
-    await alice.page
-        .getByRole('button', { name: 'Send message', exact: true })
-        .click();
-    await expect(bob.page.locator('.voice-note audio')).toHaveCount(1);
-    await bob.page
-        .locator('.voice-note audio')
-        .evaluate(async (audio: HTMLAudioElement) => {
-            await audio.play();
-        });
-    await expect
-        .poll(() =>
-            bob.page
-                .locator('.voice-note audio')
-                .evaluate((audio: HTMLAudioElement) => audio.readyState)
-        )
-        .toBeGreaterThanOrEqual(2);
-    console.log(
-        'PASS: record, encrypt, deliver, decrypt, and play a voice note'
-    );
-
-    for (const p of [alice, bob, charlie])
-        await p.page
-            .getByRole('button', { name: 'The living room', exact: true })
-            .click();
-    await bob.page.evaluate(() => {
-        window.__testSyntheticMic = true;
-    });
-    await alice.page
-        .getByRole('button', { name: 'Start video call', exact: true })
-        .click();
-    await expect(
-        alice.page.getByRole('region', { name: 'Active call' })
-    ).toBeVisible();
-    await bob.page
-        .getByRole('button', { name: 'Start voice call', exact: true })
-        .click();
-    await expect(
-        bob.page.getByRole('region', { name: 'Active call' })
-    ).toBeVisible();
-    await charlie.page
-        .getByRole('button', { name: 'Start voice call', exact: true })
-        .click();
-    for (const p of [alice, bob, charlie]) {
-        await expect
-            .poll(
-                () =>
-                    p.page.evaluate(
-                        () =>
-                            window.__testPeers.filter(
-                                (pc) => pc.connectionState === 'connected'
-                            ).length
-                    ),
-                { timeout: 25000 }
-            )
-            .toBe(2);
-        await expect
-            .poll(
-                () =>
-                    p.page.evaluate(async () => {
-                        let bytes = 0;
-                        for (const pc of window.__testPeers)
-                            for (const report of (await pc.getStats()).values())
-                                if (report.type === 'inbound-rtp')
-                                    bytes += Number(report.bytesReceived || 0);
-                        return bytes;
-                    }),
-                { timeout: 15000 }
-            )
-            .toBeGreaterThan(0);
-    }
-    await alice.page
-        .getByRole('button', { name: 'Mute microphone', exact: true })
-        .click();
-    await expect(
-        alice.page.getByRole('button', {
-            name: 'Unmute microphone',
-            exact: true,
-        })
-    ).toBeVisible();
-    await alice.page
-        .getByRole('button', { name: 'Turn camera off', exact: true })
-        .click();
-    await alice.page
-        .getByRole('button', { name: 'Turn camera on', exact: true })
-        .click();
-    try {
-        await expect(bob.page.locator('.video-tile video')).toHaveCount(1);
-    } catch (error) {
-        console.log(
-            'CALL DIAGNOSTICS',
-            await bob.page.evaluate(() => ({
-                notice: document.querySelector('.toast')?.textContent,
-                peers: window.__testPeers.map((pc) => ({
-                    status: pc.connectionState,
-                    tracks: pc.getTransceivers().map((t) => ({
-                        mid: t.mid,
-                        direction: t.currentDirection,
-                        kind: t.receiver.track.kind,
-                        state: t.receiver.track.readyState,
-                        muted: t.receiver.track.muted,
-                    })),
-                })),
-            }))
-        );
-        await bob.page.screenshot({ path: 'test-results/call-failure.png' });
-        throw error;
-    }
-    await alice.page.screenshot({ path: 'test-results/desktop-call.png' });
-    console.log(
-        'PASS: three-person WebRTC mesh, actual inbound media packets, mute, and camera toggles'
-    );
-
-    await checkSpeaking(alice.page, bob.page);
-    await checkParticipantVolume(alice.page, bob.page);
-    await checkCallLayoutAndNoise(alice.page, bob.page);
-    await checkScreenAudioAndPopout(alice.page, bob.page);
-    for (const p of [alice, bob, charlie])
-        await p.page
-            .getByRole('button', { name: 'Leave', exact: true })
-            .click();
-    assert.equal(
-        await alice.page.evaluate(() =>
-            window.__testPeers.some((pc) => pc.connectionState !== 'closed')
-        ),
-        false
-    );
-    for (const p of [alice, bob, charlie]) await checkCaptureCleanup(p.page);
-    console.log('PASS: screen-share start/stop, call teardown');
+    await checkVoiceNote(alice, bob);
+    await checkCalls(alice, bob, charlie);
 
     const row = (page: Page, text: string) =>
         page
@@ -874,12 +928,18 @@ async function run() {
         ),
         false
     );
-    await alice.page.getByLabel('Choose attachment').setInputFiles({
-        name: 'too-big.dat',
-        mimeType: 'application/octet-stream',
-        buffer: Buffer.alloc(5 * 1024 * 1024 + 1),
-    });
-    await expect(alice.page.locator('.toast')).toContainText('up to 5 MB');
+    // Build the oversized file in the page rather than streaming 256 MB over CDP.
+    await alice.page
+        .getByLabel('Choose attachment')
+        .evaluate((input: HTMLInputElement) => {
+            const files = new DataTransfer();
+            files.items.add(
+                new File([new Uint8Array(256 * 1024 * 1024 + 1)], 'too-big.dat')
+            );
+            input.files = files.files;
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    await expect(alice.page.locator('.toast')).toContainText('up to 256 MB');
     await expect(alice.page.locator('.attachment-preview')).toHaveCount(0);
     console.log(
         'PASS: encrypted file upload/download, filename privacy, file-size limit'
