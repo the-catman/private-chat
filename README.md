@@ -4,7 +4,7 @@ End-to-end encrypted chat for small groups, with DMs, file sharing, voice/video 
 
 ## How to run
 
-Requires Node.js 22.12+ and [Caddy](https://caddyserver.com/), which `npm run dev` starts with the included `Caddyfile`. To let it use ports 80 and 443, run `sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"` once (and after Caddy upgrades), and stop any other Caddy.
+Requires Node.js 22.23.4+ and [Caddy](https://caddyserver.com/), which `npm run dev` starts with the included `Caddyfile`. To let it use ports 80 and 443, run `sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"` once (and after Caddy upgrades), and stop any other Caddy.
 
 Copy `.env.example` to `.env` if it doesn't already exist. Set `APP_PASSWORD` (at least 16 characters) and `APP_ORIGIN` (your HTTPS address), then run:
 
