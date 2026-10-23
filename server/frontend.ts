@@ -20,8 +20,9 @@ export async function createDevFrontend(
     root = resolve('.')
 ): Promise<Frontend> {
     const { createServer: createViteServer } = await import('vite');
-    // This server never listens. Express forwards only HTTPS/origin-checked
+    // This server never listens. Express forwards only origin-checked
     // development WebSockets here; Vite doesn't open a second public port.
+    // The browser reaches it at whichever address it opened.
     const updates = createServer();
     const upgradePath = '/__vite_hmr';
     const origin = new URL(config.origin);
@@ -60,8 +61,6 @@ export async function createDevFrontend(
             allowedHosts: [origin.hostname],
             hmr: {
                 server: updates,
-                protocol: 'wss',
-                clientPort: Number(origin.port || 443),
                 path: upgradePath,
             },
             fs: {

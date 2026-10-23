@@ -90,7 +90,7 @@ await promisify(execFile)('openssl', [
     '-addext',
     'subjectAltName=DNS:localhost,IP:127.0.0.1',
 ]);
-// Test-only HTTPS ingress emulates Caddy. The public server has no HTTP bypass.
+// Test-only HTTPS ingress emulates Caddy. Plain HTTP is only served to localhost.
 const ingress = createServer(
     {
         key: await readFile(join(dir, 'key.pem')),

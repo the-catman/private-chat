@@ -18,7 +18,7 @@ try {
     });
     app.server.listen(config.port, '127.0.0.1', () => {
         console.log(
-            `Hush is ready at ${config.origin} (Caddy → 127.0.0.1:${config.port}).`
+            `Hush is ready at ${config.origin}, and at http://localhost:${config.port} on this machine.`
         );
         if (development)
             console.log(

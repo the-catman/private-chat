@@ -85,6 +85,8 @@ export type SessionConfig = {
     maxClients: number;
     expires: number;
     protocol?: number;
+    // The public address, for invite links opened from localhost.
+    origin?: string;
 };
 export type MediaKind = 'mic' | 'camera' | 'screen' | 'system';
 export type MediaState = {

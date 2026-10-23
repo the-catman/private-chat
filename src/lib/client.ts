@@ -199,14 +199,10 @@ export class ChatClient {
         return result;
     }
     async resume() {
-        if (
-            location.protocol !== 'https:' ||
-            !globalThis.isSecureContext ||
-            !crypto.subtle
-        ) {
+        if (!globalThis.isSecureContext || !crypto.subtle) {
             this.update({
                 phase: 'login',
-                error: 'Open Hush at its HTTPS address. A secure connection is required.',
+                error: 'Open Hush at its HTTPS address or localhost. A secure connection is required.',
             });
             return;
         }
@@ -279,7 +275,7 @@ export class ChatClient {
         this.queue = Promise.resolve();
         this.incoming.clear();
         const ws = new WebSocket(
-            `${location.origin.replace(/^https:/, 'wss:')}/ws`
+            `${location.origin.replace(/^http/, 'ws')}/ws`
         );
         ws.binaryType = 'arraybuffer';
         this.ws = ws;

@@ -1,0 +1,11 @@
+# Started by `npm run dev` and `npm start`, which read APP_ORIGIN and PORT from .env.
+{
+	admin off
+	log {
+		level ERROR
+	}
+}
+
+{$APP_ORIGIN} {
+	reverse_proxy 127.0.0.1:{$PORT:5173}
+}

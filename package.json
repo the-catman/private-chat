@@ -8,9 +8,9 @@
         "node": ">=22.12.0"
     },
     "scripts": {
-        "dev": "tsx watch --clear-screen=false --include .env --env-file=.env server/index.ts --dev",
+        "dev": "node --import=tsx scripts/serve.ts tsx watch --clear-screen=false --include .env --env-file=.env server/index.ts --dev",
         "build": "tsc --noEmit && vite build",
-        "start": "node --env-file=.env --import=tsx server/index.ts",
+        "start": "node --import=tsx scripts/serve.ts node --env-file=.env --import=tsx server/index.ts",
         "test": "node --import=tsx --test test/*.test.ts",
         "test:browser": "node --import=tsx test/browser.ts",
         "typecheck": "tsc --noEmit",

@@ -44,15 +44,19 @@ function fetch(
     return new Promise<{
         status: number;
         headers: { get: (name: string) => string | null };
+        json: () => Promise<any>;
     }>((resolve, reject) => {
         const req = request(
             url,
             { method: options.method, headers: options.headers },
             (response) => {
-                response.resume();
+                const body: Buffer[] = [];
+                response.on('data', (chunk) => body.push(chunk));
                 response.on('end', () =>
                     resolve({
                         status: response.statusCode!,
+                        json: async () =>
+                            JSON.parse(Buffer.concat(body).toString()),
                         headers: {
                             get: (name) => {
                                 const value = response.headers[name];
@@ -183,7 +187,22 @@ async function fixture() {
 test('HTTPS proxy, origin, password, cookie and asset boundaries are enforced', async () => {
     const f = await fixture();
     try {
-        assert.equal((await fetch(f.url)).status, 426);
+        const port = new URL(f.url).port;
+        // Plain HTTP for the public host, other hosts (DNS rebinding), and
+        // anything a proxy forwarded under a local name are refused.
+        for (const refused of <Record<string, string>[]>[
+            { host: 'chat.test' },
+            { host: `evil.test:${port}` },
+            { host: 'evil.test', 'x-forwarded-proto': 'https' },
+            { host: `localhost:${port}`, 'x-forwarded-for': '203.0.113.9' },
+            { host: `localhost:${port}`, 'x-forwarded-proto': 'https' },
+            { host: 'localhost:1' },
+        ])
+            assert.equal(
+                (await fetch(f.url, { headers: refused })).status,
+                426,
+                JSON.stringify(refused)
+            );
         assert.equal(
             (await fetch(`${f.url}/api/session`, { headers })).status,
             401
@@ -228,6 +247,85 @@ test('HTTPS proxy, origin, password, cookie and asset boundaries are enforced', 
         });
         const [error] = await once(ws, 'error');
         assert.match(String(error), /403/);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('this machine can open the app over HTTP on localhost', async () => {
+    const f = await fixture();
+    try {
+        const local = f.url;
+        const page = await fetch(local);
+        assert.notEqual(page.status, 426);
+        assert.equal(page.headers.get('strict-transport-security'), null);
+        assert.match(
+            page.headers.get('content-security-policy')!,
+            new RegExp(`connect-src 'self' ${local.replace('http', 'ws')};`)
+        );
+        const login = (origin: string) =>
+            fetch(`${local}/api/login`, {
+                method: 'POST',
+                headers: { origin, 'content-type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+        // Another local page, or the public origin, can't sign in here.
+        assert.equal((await login('http://localhost:1')).status, 403);
+        assert.equal((await login(origin)).status, 403);
+        const response = await login(local);
+        assert.equal(response.status, 200);
+        const cookie = response.headers.get('set-cookie')!.split(';')[0];
+        const session = await fetch(`${local}/api/session`, {
+            headers: { cookie },
+        });
+        assert.equal((await session.json()).origin, origin);
+
+        const join = async (proofOrigin: string) => {
+            const identity = await createIdentity();
+            const ws = new WebSocket(`${local.replace('http', 'ws')}/ws`, {
+                headers: { origin: local, cookie },
+            });
+            const [data] = await once(ws, 'message');
+            const challenge = JSON.parse(String(data));
+            const name = `Local ${proofOrigin.length}`;
+            ws.send(
+                JSON.stringify({
+                    type: 'join',
+                    id: identity.id,
+                    bundle: identity.bundle,
+                    name,
+                    sig: await sign(
+                        identity,
+                        proofText(
+                            proofOrigin,
+                            challenge.boot,
+                            challenge.nonce,
+                            identity.id,
+                            name
+                        )
+                    ),
+                    prekeys: await identity.ratchet.publish(1),
+                })
+            );
+            const result = await Promise.race([
+                once(ws, 'close').then(([code]) => code as number),
+                new Promise<string>((resolve) =>
+                    ws.on('message', (packet) => {
+                        if (JSON.parse(String(packet)).type === 'ready')
+                            resolve('ready');
+                    })
+                ),
+            ]);
+            ws.close();
+            return result;
+        };
+        assert.equal(await join(local), 'ready');
+        // A proof made for one origin doesn't work at another.
+        assert.equal(await join(origin), 1008);
+        const foreign = new WebSocket(`${local.replace('http', 'ws')}/ws`, {
+            headers: { origin: 'http://localhost:1', cookie },
+        });
+        assert.match(String((await once(foreign, 'error'))[0]), /403/);
     } finally {
         await f.app.close();
     }

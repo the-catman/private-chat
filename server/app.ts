@@ -61,6 +61,8 @@ type StoredMessage = {
 };
 interface ClientSocket extends WebSocket {
     auth: Session;
+    // The origin this browser opened, which its identity proof names.
+    origin: string;
     memberId?: string;
     nonce: string;
     alive: boolean;
@@ -171,12 +173,30 @@ export function createChatServer(
             if (member.ws) send(member.ws, payload);
     };
     const broadcastPeers = () => broadcast({ type: 'peers', peers: peers() });
-    const secure = (req: IncomingMessage) =>
-        ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
-            req.socket.remoteAddress || ''
-        ) &&
-        req.headers['x-forwarded-proto'] === 'https' &&
-        req.headers.host === config.host;
+    // Caddy forwards the public HTTPS origin. This machine may also open
+    // http://localhost:PORT directly, which browsers treat as secure.
+    function originOf(req: IncomingMessage) {
+        if (
+            !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+                req.socket.remoteAddress || ''
+            )
+        )
+            return;
+        const { host } = req.headers;
+        if (req.headers['x-forwarded-proto'] === 'https')
+            return host === config.host ? config.origin : undefined;
+        if (
+            !req.headers['x-forwarded-for'] &&
+            ['localhost', '127.0.0.1', '[::1]'].some(
+                (name) => host === `${name}:${req.socket.localPort}`
+            )
+        )
+            return `http://${host}`;
+    }
+    const sameOrigin = (req: IncomingMessage) => {
+        const origin = originOf(req);
+        return origin !== undefined && req.headers.origin === origin;
+    };
     function session(req: IncomingMessage): Session | null {
         const token = req.headers.cookie
             ?.split(';')
@@ -187,20 +207,22 @@ export function createChatServer(
         if (!value || value.expires <= Date.now()) return null;
         return { token, ...value };
     }
-    function headers(res: ServerResponse) {
+    function headers(req: IncomingMessage, res: ServerResponse) {
+        const origin = originOf(req) || config.origin;
         res.setHeader('Cache-Control', 'no-store, max-age=0');
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('X-Content-Type-Options', 'nosniff');
         res.setHeader('Referrer-Policy', 'no-referrer');
         res.setHeader('X-Frame-Options', 'DENY');
-        res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+        if (origin === config.origin)
+            res.setHeader('Strict-Transport-Security', 'max-age=31536000');
         res.setHeader(
             'Permissions-Policy',
             'camera=(self), microphone=(self), display-capture=(self), geolocation=()'
         );
         res.setHeader(
             'Content-Security-Policy',
-            `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src ${frontend ? "'self' blob:" : "'self'"}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss://${config.host}; media-src 'self' blob:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'`
+            `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src ${frontend ? "'self' blob:" : "'self'"}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ${origin.replace(/^http/, 'ws')}; media-src 'self' blob:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'`
         );
     }
     function json(res: ServerResponse, status: number, body: unknown) {
@@ -233,10 +255,10 @@ export function createChatServer(
     const app = express();
     app.disable('x-powered-by');
     app.use((req, res, next) => {
-        headers(res);
-        if (!secure(req))
+        headers(req, res);
+        if (!originOf(req))
             return json(res, 426, {
-                error: 'Open this app through its configured HTTPS address.',
+                error: 'Open this app through its configured HTTPS address or localhost.',
             });
         next();
     });
@@ -244,7 +266,7 @@ export function createChatServer(
     app.use(async (req: Request, res: Response, next: NextFunction) => {
         try {
             if (req.url === '/api/login' && req.method === 'POST') {
-                if (req.headers.origin !== config.origin)
+                if (!sameOrigin(req))
                     return json(res, 403, { error: 'Origin not allowed.' });
                 if (throttle(req)) {
                     res.setHeader('Retry-After', '60');
@@ -291,10 +313,11 @@ export function createChatServer(
                     maxClients: config.maxClients,
                     expires: auth.expires,
                     protocol: PROTOCOL,
+                    origin: config.origin,
                 });
             }
             if (req.url === '/api/logout' && req.method === 'POST') {
-                if (req.headers.origin !== config.origin)
+                if (!sameOrigin(req))
                     return json(res, 403, { error: 'Origin not allowed.' });
                 const auth = session(req);
                 if (auth) {
@@ -367,7 +390,7 @@ export function createChatServer(
             new URL(req.url || '/', config.origin).pathname ===
                 frontend.upgradePath
         ) {
-            if (!secure(req) || req.headers.origin !== config.origin) {
+            if (!sameOrigin(req)) {
                 socket.end(
                     'HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'
                 );
@@ -378,8 +401,7 @@ export function createChatServer(
         }
         const auth = session(req);
         if (
-            !secure(req) ||
-            req.headers.origin !== config.origin ||
+            !sameOrigin(req) ||
             req.url !== '/ws' ||
             !auth ||
             sockets.size >= 16
@@ -389,6 +411,7 @@ export function createChatServer(
         }
         wss.handleUpgrade(req, socket, head, (ws) => {
             (ws as ClientSocket).auth = auth;
+            (ws as ClientSocket).origin = originOf(req)!;
             wss.emit('connection', ws);
         });
     });
@@ -524,7 +547,7 @@ export function createChatServer(
                 (await identityId(packet.bundle)) !== packet.id ||
                 !(await verify(
                     packet.bundle,
-                    proofText(config.origin, boot, ws.nonce, packet.id, name),
+                    proofText(ws.origin, boot, ws.nonce, packet.id, name),
                     packet.sig
                 )) ||
                 !(await signedPrekey(packet.bundle, packet.prekeys.spk))

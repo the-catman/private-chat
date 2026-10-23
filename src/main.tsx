@@ -1721,14 +1721,16 @@ function App() {
                         icon="copy"
                         label="Copy invite link"
                         onClick={() => {
+                            const link =
+                                state.config?.origin || location.origin;
                             void navigator.clipboard
-                                .writeText(location.origin)
+                                .writeText(link)
                                 .then(() =>
                                     client.notify(
                                         'Invite link copied. Share the password separately.'
                                     )
                                 )
-                                .catch(() => client.notify(location.origin));
+                                .catch(() => client.notify(link));
                         }}
                     />
                 </div>
