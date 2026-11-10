@@ -57,6 +57,9 @@ let sending: KeySet | null = null;
 let me = '';
 let nonce = 0;
 const requested = new Set<string>();
+// One replay window per sender and key set, shared by all of that sender's
+// streams. A stream the server announces again cannot replay old frames.
+const windows = new Map<string, ReplayWindow>();
 
 // Later generations of a sender's ratchet are derived on the main thread.
 function key(set: KeySet, member: string, gen: number) {
@@ -96,6 +99,8 @@ scope.onmessage = ({ data }) => {
         ),
         set,
     ].slice(-4);
+    for (const tag of windows.keys())
+        if (!sets.some((s) => tag.startsWith(`${s.id}:`))) windows.delete(tag);
     me = data.self;
     // Receivers install keys first; senders switch a moment later.
     const use = () => {
@@ -110,7 +115,6 @@ scope.onmessage = ({ data }) => {
 
 scope.onrtctransform = ({ transformer }) => {
     const { kind, operation, sender } = transformer.options;
-    const windows = new Map<number, ReplayWindow>();
     const encrypt = async (
         frame: Frame,
         controller: TransformStreamDefaultController<Frame>
@@ -137,13 +141,9 @@ scope.onrtctransform = ({ transformer }) => {
             const k = key(set, sender, generation(parsed.nonce));
             const plain = k && (await decryptFrame(k, parsed));
             if (!plain) continue;
-            let window = windows.get(set.id);
-            if (!window) {
-                if (windows.size >= 8)
-                    for (const id of windows.keys())
-                        if (!sets.some((s) => s.id === id)) windows.delete(id);
-                windows.set(set.id, (window = new ReplayWindow()));
-            }
+            const tag = `${set.id}:${sender}`;
+            let window = windows.get(tag);
+            if (!window) windows.set(tag, (window = new ReplayWindow()));
             if (!window.accept(parsed.nonce)) return;
             frame.data = plain.buffer as ArrayBuffer;
             controller.enqueue(frame);
