@@ -11,6 +11,7 @@ import express, {
     type NextFunction,
 } from 'express';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { isIPv6 } from 'node:net';
 import type { Config } from './config';
 import { CallError, createCalls } from './calls.ts';
 import type { Frontend } from './frontend';
@@ -45,6 +46,30 @@ import {
     normalizeName,
     validName,
 } from '../src/lib/limits.ts';
+
+// One IPv6 user usually controls a whole /64, so rate limits group by it.
+export function addressGroup(ip: string) {
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+    if (mapped) return mapped[1]!;
+    if (!isIPv6(ip)) return ip;
+    const [head = '', tail] = ip.split('%')[0]!.split('::');
+    const left = head ? head.split(':') : [];
+    const right = tail ? tail.split(':') : [];
+    const groups =
+        tail === undefined
+            ? left
+            : [
+                  ...left,
+                  ...Array(Math.max(0, 8 - left.length - right.length)).fill(
+                      '0'
+                  ),
+                  ...right,
+              ];
+    return `${groups
+        .slice(0, 4)
+        .map((group) => parseInt(group, 16).toString(16))
+        .join(':')}::/64`;
+}
 
 type Auth = { id: string; expires: number };
 type Session = Auth & { token: string };
@@ -231,8 +256,9 @@ export function createChatServer(
         });
         res.end(JSON.stringify(body));
     }
-    function throttle(req: IncomingMessage) {
-        const now = Date.now();
+    // Login limits count wrong passwords only. Refused requests do not count,
+    // so one client cannot lock everyone else out by sending bad guesses.
+    function clientKey(req: IncomingMessage) {
         // Caddy overwrites X-Forwarded-For by default; only trust the last proxy-added IP.
         const ip = String(
             req.headers['x-forwarded-for'] || req.socket.remoteAddress
@@ -241,15 +267,29 @@ export function createChatServer(
             .at(-1)!
             .trim()
             .slice(0, 80);
-        let bucket = attempts.get(ip);
-        if (!bucket || now - bucket.start > 60_000)
-            bucket = { start: now, count: 0 };
+        return addressGroup(ip);
+    }
+    function throttled(key: string) {
+        const now = Date.now();
         if (now - globalAttempts.start > 60_000)
             globalAttempts = { start: now, count: 0 };
-        if (attempts.size < 1024 || attempts.has(ip)) attempts.set(ip, bucket);
+        const bucket = attempts.get(key);
+        return (
+            (bucket !== undefined &&
+                now - bucket.start <= 60_000 &&
+                bucket.count >= 8) ||
+            globalAttempts.count >= 240
+        );
+    }
+    function failedLogin(key: string) {
+        const now = Date.now();
+        let bucket = attempts.get(key);
+        if (!bucket || now - bucket.start > 60_000)
+            bucket = { start: now, count: 0 };
+        if (attempts.size < 1024 || attempts.has(key))
+            attempts.set(key, bucket);
         bucket.count++;
         globalAttempts.count++;
-        return bucket.count > 8 || globalAttempts.count > 80;
     }
 
     const app = express();
@@ -268,7 +308,8 @@ export function createChatServer(
             if (req.url === '/api/login' && req.method === 'POST') {
                 if (!sameOrigin(req))
                     return json(res, 403, { error: 'Origin not allowed.' });
-                if (throttle(req)) {
+                const client = clientKey(req);
+                if (throttled(client)) {
                     res.setHeader('Retry-After', '60');
                     return json(res, 429, {
                         error: 'Too many attempts. Try again in one minute.',
@@ -281,10 +322,12 @@ export function createChatServer(
                     typeof data.password !== 'string' ||
                     data.password.length > 512 ||
                     !timingSafeEqual(hash(data.password), passwordHash)
-                )
+                ) {
+                    failedLogin(client);
                     return json(res, 401, {
                         error: 'That password is not right. Try again.',
                     });
+                }
                 if (sessions.size >= 128)
                     return json(res, 503, {
                         error: 'Too many active sessions. Try again later.',

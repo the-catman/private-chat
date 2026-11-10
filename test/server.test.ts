@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { createChatServer } from '../server/app';
+import { addressGroup, createChatServer } from '../server/app';
 import { readConfig } from '../server/config';
 import {
     dmScope,
@@ -247,6 +247,36 @@ test('HTTPS proxy, origin, password, cookie and asset boundaries are enforced', 
         });
         const [error] = await once(ws, 'error');
         assert.match(String(error), /403/);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('wrong passwords from one network cannot lock everyone else out', async () => {
+    assert.equal(addressGroup('203.0.113.7'), '203.0.113.7');
+    assert.equal(addressGroup('::ffff:203.0.113.7'), '203.0.113.7');
+    assert.equal(addressGroup('2001:db8:1:2::5'), '2001:db8:1:2::/64');
+    assert.equal(addressGroup('2001:0db8::'), '2001:db8:0:0::/64');
+    const f = await fixture();
+    try {
+        const attempt = (guess: string, ip: string) =>
+            fetch(`${f.url}/api/login`, {
+                method: 'POST',
+                headers: { ...headers, 'x-forwarded-for': ip },
+                body: JSON.stringify({ password: guess }),
+            }).then((response) => response.status);
+        for (let i = 0; i < 8; i++)
+            assert.equal(await attempt('wrong', '203.0.113.7'), 401);
+        // Refused attempts keep that address waiting without using up the
+        // limit everyone shares.
+        for (let i = 0; i < 100; i++)
+            assert.equal(await attempt('wrong', '203.0.113.7'), 429);
+        assert.equal(await attempt(password, '203.0.113.7'), 429);
+        // Addresses in one IPv6 /64 share a limit.
+        for (let i = 1; i <= 8; i++)
+            assert.equal(await attempt('wrong', `2001:db8:1:2::${i}`), 401);
+        assert.equal(await attempt('wrong', '2001:db8:1:2:ffff::9'), 429);
+        assert.equal(await attempt(password, '198.51.100.4'), 200);
     } finally {
         await f.app.close();
     }
