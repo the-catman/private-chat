@@ -41,6 +41,8 @@ function harness() {
         }
     >();
     const known = new Map<string, Bundle>();
+    // Who the peer list shows in a call, as the client UI would.
+    const visible = new Map<string, string>();
     async function person(trusted = true) {
         const identity = await createIdentity();
         if (trusted) known.set(identity.id, identity.bundle);
@@ -51,8 +53,9 @@ function harness() {
         });
         return identity.id;
     }
-    function join(id: string, scope = 'room') {
+    function join(id: string, scope = 'room', shown = true) {
         const record = people.get(id)!;
+        if (shown) visible.set(id, scope);
         calls.join(scope, id, (packet) => {
             if (packet.type === 'mls')
                 setImmediate(() => record.session?.receive(packet));
@@ -62,6 +65,7 @@ function harness() {
             boot,
             scope,
             bundle: (member) => known.get(member),
+            present: (member) => visible.get(member) === scope,
             send: (packet) => setImmediate(() => calls.mls(id, packet)),
             install: (secrets) => {
                 record.secrets = secrets;
@@ -74,6 +78,7 @@ function harness() {
     function leave(id: string) {
         people.get(id)!.session?.close();
         people.get(id)!.session = undefined;
+        visible.delete(id);
         calls.leave(id);
     }
     // Everyone listed derives the same base secret for every listed sender.
@@ -136,6 +141,27 @@ test('call keys follow MLS membership as people join and leave', async () => {
         await until(() => h.agreed([carol]), 'carol alone');
         h.join(bob);
         await until(() => h.agreed([carol, bob]), 'bob back with carol');
+    } finally {
+        await h.calls.close();
+    }
+});
+
+test('the leader admits no one the peer list does not show in the call', async () => {
+    const h = harness();
+    try {
+        const alice = await h.person();
+        const bob = await h.person();
+        // A valid, known identity that the server keeps out of the visible
+        // call list, as it would for a hidden or offline ghost member.
+        const ghost = await h.person();
+        h.join(alice);
+        await until(() => h.agreed([alice]), 'alice creates the group');
+        h.join(ghost, 'room', false);
+        h.join(bob);
+        await until(() => h.agreed([alice, bob]), 'bob joins');
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(h.people.get(ghost)!.installs, 0);
+        assert.equal(h.people.get(alice)!.session!.members().has(ghost), false);
     } finally {
         await h.calls.close();
     }

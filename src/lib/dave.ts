@@ -78,6 +78,9 @@ type Options = {
     boot: string;
     scope: string;
     bundle: (id: string) => Bundle | undefined;
+    // Whether this person is visibly in the call. The leader admits no one
+    // else, so the server cannot add a hidden member.
+    present: (id: string) => boolean;
     send: (packet: MlsClientPacket) => void;
     // Receives every member's base secret for the new epoch.
     install: (secrets: Map<string, Uint8Array>, delay: number) => void;
@@ -285,6 +288,7 @@ export class DaveSession {
             if (
                 cipherSuite !== SUITE ||
                 credentialId(leafNode.credential)?.id !== candidate.id ||
+                !this.options.present(candidate.id) ||
                 !(await this.validate(
                     leafNode.credential,
                     leafNode.signaturePublicKey

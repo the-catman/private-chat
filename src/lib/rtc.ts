@@ -270,6 +270,13 @@ export class CallEngine {
                 id === this.id
                     ? this.identity.bundle
                     : this.members.find((member) => member.id === id)?.bundle,
+            present: (id) =>
+                this.members.some(
+                    (member) =>
+                        member.id === id &&
+                        member.online &&
+                        member.call === this.scope
+                ),
             send: (packet) => this.wire(packet),
             install: (secrets, delay) => this.install(secrets, delay),
             fail: () =>
@@ -562,8 +569,10 @@ export class CallEngine {
         });
     }
     sync(members: Peer[]) {
-        if (!this.scope) return;
+        // Kept current even while joining: the call leader admits only
+        // people this list shows in the call.
         this.members = members;
+        if (!this.scope) return;
         const active = members.filter(
             (p) => p.id !== this.id && p.online && p.call === this.scope
         );
