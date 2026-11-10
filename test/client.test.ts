@@ -414,6 +414,54 @@ test('a relay cannot place a message in another DM or roll back an edit', async 
     });
 });
 
+test('messages follow their signed send times, and edits keep their place', async () => {
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const { client } = clientFor(alice, [alice, bob], boot);
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const text = (value: string) => ({ kind: 'text', text: value });
+    const first = await seal(
+        bob,
+        [bob, alice],
+        boot,
+        'room',
+        'chat',
+        text('one')
+    );
+    await tick();
+    const second = await seal(
+        bob,
+        [bob, alice],
+        boot,
+        'room',
+        'chat',
+        text('two')
+    );
+    await tick();
+    const edit = await seal(
+        bob,
+        [bob, alice],
+        boot,
+        'room',
+        'edit',
+        text('one, edited'),
+        { targets: [first.id], revision: first.id, since: first.time }
+    );
+    // The relay stamps them in the wrong order. After a reload, history holds
+    // only the latest revision of the first message.
+    await client.receive({ type: 'message', envelope: second, received: 1 });
+    await client.receive({ type: 'message', envelope: edit, received: 2 });
+    assert.deepEqual(
+        client.state.messages.map(
+            (m) => m.payload.kind === 'text' && m.payload.text
+        ),
+        ['one, edited', 'two']
+    );
+});
+
 test('signing out cancels in-flight encryption and decryption without restoring cleared messages', async () => {
     const [alice, bob] = await Promise.all([
         createIdentity(),

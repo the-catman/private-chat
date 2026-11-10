@@ -152,6 +152,7 @@ export const aadText = (m: Envelope) =>
         m.revision ?? null,
         // Older message shapes keep their exact authenticated data.
         ...(m.parts === undefined ? [] : [m.parts]),
+        ...(m.since === undefined ? [] : [['since', m.since]]),
     ]);
 // The author's entry is a self key; everyone else gets a ratchet message.
 const entryText = (m: Envelope, id: string) => {
@@ -186,7 +187,12 @@ export async function seal(
     scope: string,
     type: Envelope['type'],
     payload: unknown,
-    operation: { targets?: string[]; revision?: string; parts?: number } = {}
+    operation: {
+        targets?: string[];
+        revision?: string;
+        parts?: number;
+        since?: number;
+    } = {}
 ): Promise<Envelope> {
     const raw = crypto.getRandomValues(new Uint8Array(32));
     try {

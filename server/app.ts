@@ -543,6 +543,11 @@ export function createChatServer(
         } else if (m.targets !== undefined || m.revision !== undefined)
             return false;
         if (
+            m.since !== undefined &&
+            (m.type !== 'edit' || !Number.isSafeInteger(m.since))
+        )
+            return false;
+        if (
             m.parts !== undefined &&
             (m.type !== 'chat' ||
                 !Number.isSafeInteger(m.parts) ||

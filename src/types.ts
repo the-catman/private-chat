@@ -38,6 +38,8 @@ export type Envelope = {
     targets?: string[];
     revision?: string;
     parts?: number;
+    // An edit's original send time, so the message keeps its place.
+    since?: number;
     time: number;
     iv: string;
     data: string;

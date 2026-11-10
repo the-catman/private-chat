@@ -859,7 +859,11 @@ export class ChatClient {
             from: envelope.from,
             name: this.state.peers.find((p) => p.id === envelope.from)!.name,
             scope: envelope.scope,
-            time: packet.source?.received ?? packet.received,
+            // The sender's signed time orders messages, so the relay cannot.
+            // An edit carries its original's time; a clock far ahead is capped.
+            time:
+                existing?.time ??
+                Math.min(envelope.since ?? envelope.time, Date.now() + 60_000),
             payload,
             status: 'sent',
             envelope,
@@ -1117,7 +1121,11 @@ export class ChatClient {
                 message.scope,
                 'edit',
                 payload,
-                { targets: [id], revision: message.envelope.id }
+                {
+                    targets: [id],
+                    revision: message.envelope.id,
+                    since: message.envelope.since ?? message.envelope.time,
+                }
             )
         );
     }
@@ -1279,7 +1287,7 @@ export class ChatClient {
                     from: this.identity.id,
                     name: this.state.name,
                     scope,
-                    time: Date.now(),
+                    time: envelope.time,
                     payload,
                     status: 'sending',
                     envelope,
