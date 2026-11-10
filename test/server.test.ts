@@ -282,6 +282,31 @@ test('wrong passwords from one network cannot lock everyone else out', async () 
     }
 });
 
+test('only the two people in a DM call can see that it is active', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const charlie = await f.join('Charlie');
+        const dm = dmScope(alice.identity.id, bob.identity.id);
+        const callOf = (packet: ServerPacket | undefined) =>
+            packet?.type === 'peers'
+                ? packet.peers.find((p) => p.id === alice.identity.id)?.call
+                : undefined;
+        alice.ws.send(JSON.stringify({ type: 'call', scope: dm }));
+        while (callOf(await bob.wait('peers')) !== dm);
+        alice.ws.send(JSON.stringify({ type: 'call', scope: 'room' }));
+        // Charlie gets every update in order, and sees only the room call.
+        for (;;) {
+            const call = callOf(await charlie.wait('peers'));
+            if (call === 'room') break;
+            assert.equal(call, null);
+        }
+    } finally {
+        await f.app.close();
+    }
+});
+
 test('this machine can open the app over HTTP on localhost', async () => {
     const f = await fixture();
     try {

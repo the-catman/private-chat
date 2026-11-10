@@ -175,12 +175,14 @@ export function createChatServer(
         maxPayload: MAX_PACKET,
         perMessageDeflate: false,
     });
-    const publicMember = (member: Member) => ({
+    // A DM call is visible only to its two participants.
+    const publicMember = (member: Member, viewer: string) => ({
         id: member.id,
         name: member.name,
         bundle: member.bundle,
         online: Boolean(member.ws),
-        call: member.call || null,
+        call:
+            member.call && validScope(member.call, viewer) ? member.call : null,
     });
 
     function send(ws: ClientSocket, payload: ServerPacket) {
@@ -192,12 +194,17 @@ export function createChatServer(
             );
         ws.send(JSON.stringify(payload));
     }
-    const peers = () => Array.from(members.values(), publicMember);
+    const peers = (viewer: string) =>
+        Array.from(members.values(), (member) => publicMember(member, viewer));
     const broadcast = (payload: ServerPacket) => {
         for (const member of members.values())
             if (member.ws) send(member.ws, payload);
     };
-    const broadcastPeers = () => broadcast({ type: 'peers', peers: peers() });
+    const broadcastPeers = () => {
+        for (const member of members.values())
+            if (member.ws)
+                send(member.ws, { type: 'peers', peers: peers(member.id) });
+    };
     // Caddy forwards the public HTTPS origin. This machine may also open
     // http://localhost:PORT directly, which browsers treat as secure.
     function originOf(req: IncomingMessage) {
@@ -658,7 +665,7 @@ export function createChatServer(
                 },
                 replenishing: false,
             });
-            send(ws, { type: 'ready', boot, peers: peers() });
+            send(ws, { type: 'ready', boot, peers: peers(packet.id) });
             for (const cleared of clears.values()) {
                 if (validScope(cleared.scope, packet.id)) send(ws, cleared);
             }
