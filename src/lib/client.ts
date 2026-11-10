@@ -674,6 +674,14 @@ export class ChatClient {
         if (this.seen.has(m.id)) return;
         const sender = this.state.peers.find((p) => p.id === m.from);
         if (!sender) throw new Error('Unknown sender.');
+        // The relay chooses who receives what. Another person's message can
+        // only belong to the room or to the DM between them and this browser.
+        if (
+            m.from !== this.identity.id &&
+            m.scope !== 'room' &&
+            m.scope !== dmScope(this.identity.id, m.from)
+        )
+            throw new Error('Message sent to another conversation.');
         let parts: CryptoKey | undefined;
         let decrypted: unknown;
         const session = this.state.config!.boot;
@@ -757,6 +765,8 @@ export class ChatClient {
         if (m.type === 'share') {
             if (!packet.source) throw new Error('Missing original message.');
             envelope = packet.source.envelope;
+            if (envelope.scope !== 'room')
+                throw new Error('Only room history can be shared.');
         }
         const audience = new Set(Object.keys(envelope.keys));
         // Each signed grant extends a chain rooted in the original recipients.
@@ -811,8 +821,20 @@ export class ChatClient {
             throw new Error('Invalid file message.');
         const id = messageId(envelope);
         const existing = this.state.messages.find((item) => item.id === id);
-        if (existing && existing.from !== envelope.from)
+        if (
+            existing &&
+            (existing.from !== envelope.from ||
+                existing.scope !== envelope.scope)
+        )
             throw new Error('Message author changed.');
+        // A relay could replay an older revision over a newer one. Keep the
+        // newest signed revision unless this one directly follows it.
+        if (
+            existing &&
+            envelope.time < existing.envelope.time &&
+            envelope.revision !== existing.envelope.id
+        )
+            return;
         // An edit replaces the earlier revision and its history grants.
         if (existing && existing.envelope.id !== envelope.id)
             this.identity.ratchet.forget([

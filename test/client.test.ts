@@ -361,6 +361,59 @@ test('a relay cannot invent a history-sharing chain, even when it has a valid or
     assert.deepEqual(b.client.state.messages, []);
 });
 
+test('a relay cannot place a message in another DM or roll back an edit', async () => {
+    const [alice, bob, mallory] = await Promise.all(
+        Array.from({ length: 3 }, () => createIdentity())
+    );
+    const boot = crypto.randomUUID();
+    const { client } = clientFor(alice, [alice, bob, mallory], boot);
+    // A validly signed message from Mallory, labelled as Alice and Bob's DM.
+    const injected = await seal(
+        mallory,
+        [mallory, alice],
+        boot,
+        dmScope(alice.id, bob.id),
+        'chat',
+        { kind: 'text', text: 'Hi, it is Bob' }
+    );
+    await assert.rejects(
+        client.receive({ type: 'message', envelope: injected, received: 1 }),
+        /another conversation/
+    );
+    assert.equal(client.state.messages.length, 0);
+
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const revise = (text: string, revision: string, original: string) =>
+        seal(
+            bob,
+            [bob, alice],
+            boot,
+            'room',
+            'edit',
+            { kind: 'text', text },
+            { targets: [original], revision }
+        );
+    const original = await seal(bob, [bob, alice], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'v0',
+    });
+    await tick();
+    const first = await revise('v1', original.id, original.id);
+    await tick();
+    const second = await revise('v2', first.id, original.id);
+    for (const [envelope, received] of [
+        [original, 2],
+        [second, 3],
+        [first, 4],
+    ] as const)
+        await client.receive({ type: 'message', envelope, received });
+    assert.equal(client.state.messages.length, 1);
+    assert.deepEqual(client.state.messages[0]!.payload, {
+        kind: 'text',
+        text: 'v2',
+    });
+});
+
 test('signing out cancels in-flight encryption and decryption without restoring cleared messages', async () => {
     const [alice, bob] = await Promise.all([
         createIdentity(),
