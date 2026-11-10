@@ -41,6 +41,9 @@ type Pending = {
 };
 const KINDS: MediaKind[] = ['mic', 'camera', 'screen', 'system'];
 const REQUEST_MS = 10_000;
+// How long someone who left may keep this call's keys before sending pauses.
+// The leader normally removes them within a second or two.
+const LINGER_MS = 5_000;
 const UNREACHABLE =
     'Could not reach the call server. Check your connection, or ask whoever runs Hush to open its media port.';
 export class CallEngine {
@@ -84,9 +87,13 @@ export class CallEngine {
     private bases = new Map<number, Map<string, Uint8Array>>();
     private keySet = 0;
     private keyed = new Set<string>();
+    private keyedSet = 0;
+    private held = false;
+    private holdTimer?: ReturnType<typeof setTimeout>;
     private installing: Promise<void> = Promise.resolve();
     private restarted = new Map<string, number>();
     private ratchetKey?: typeof import('./dave.ts').ratchetKey;
+    private lingering?: typeof import('./dave.ts').lingering;
     constructor(
         public identity: Identity,
         public config: SessionConfig,
@@ -248,6 +255,7 @@ export class CallEngine {
             }>({ action: 'setup' }),
         ]);
         this.ratchetKey = dave.ratchetKey;
+        this.lingering = dave.lingering;
         const device = await Device.factory();
         await device.load({ routerRtpCapabilities: setup.rtpCapabilities });
         if (operation !== this.operation) return;
@@ -378,9 +386,45 @@ export class CallEngine {
                     delay,
                 } satisfies WorkerMessage);
                 this.keyed = new Set(secrets.keys());
+                this.keyedSet = set;
+                this.checkRoster();
                 this.emit();
             })
             .catch(() => {});
+    }
+    // Stops sending media while the call keys include someone who left. The
+    // server might never remove them, so this does not wait for it forever.
+    private checkRoster() {
+        const stale = () =>
+            this.lingering?.(this.keyed, this.members, this.id, this.scope!)
+                .length;
+        if (!this.worker || !this.scope) return;
+        if (!stale()) {
+            clearTimeout(this.holdTimer);
+            this.holdTimer = undefined;
+            if (this.held) {
+                this.held = false;
+                // Resume only under keys that no longer include them.
+                this.worker.postMessage({
+                    type: 'hold',
+                    from: this.keyedSet,
+                } satisfies WorkerMessage);
+            }
+            return;
+        }
+        if (this.held) return;
+        this.holdTimer ??= setTimeout(() => {
+            this.holdTimer = undefined;
+            if (!this.worker || this.held || !stale()) return;
+            this.held = true;
+            this.worker.postMessage({
+                type: 'hold',
+                from: Infinity,
+            } satisfies WorkerMessage);
+            this.notify(
+                'Your audio and video are paused: someone who left this call can still decrypt it. Leave and join again if this lasts.'
+            );
+        }, LINGER_MS);
     }
     private async derive({ set, member, generation }: WorkerRequest) {
         const base = this.bases.get(set)?.get(member);
@@ -573,6 +617,7 @@ export class CallEngine {
         // people this list shows in the call.
         this.members = members;
         if (!this.scope) return;
+        this.checkRoster();
         const active = members.filter(
             (p) => p.id !== this.id && p.online && p.call === this.scope
         );
@@ -806,6 +851,10 @@ export class CallEngine {
         this.requests.clear();
         this.bases.clear();
         this.keyed = new Set();
+        this.keyedSet = 0;
+        this.held = false;
+        clearTimeout(this.holdTimer);
+        this.holdTimer = undefined;
         this.restarted.clear();
         this.tasks = this.installing = Promise.resolve();
         this.peers.clear();

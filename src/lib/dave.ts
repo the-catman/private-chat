@@ -72,6 +72,20 @@ export async function ratchetKey(base: Uint8Array, generation: number) {
     );
 }
 
+// People who still hold this call's keys but no longer show in the call. The
+// server could keep someone who hung up in the group, so every member checks.
+export const lingering = (
+    keyed: Iterable<string>,
+    members: { id: string; online: boolean; call: string | null }[],
+    self: string,
+    scope: string
+) =>
+    [...keyed].filter(
+        (id) =>
+            id !== self &&
+            !members.some((m) => m.id === id && m.online && m.call === scope)
+    );
+
 type Sync = Extract<MlsServerPacket, { action: 'sync' }>;
 type Options = {
     identity: Identity;

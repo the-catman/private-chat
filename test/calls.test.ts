@@ -4,7 +4,7 @@ import { createCalls } from '../server/calls';
 import { readConfig } from '../server/config';
 import { dmScope } from '../src/lib/crypto';
 import { createIdentity } from './identities';
-import { DaveSession, ratchetKey } from '../src/lib/dave';
+import { DaveSession, lingering, ratchetKey } from '../src/lib/dave';
 import {
     clearRanges,
     decryptFrame,
@@ -94,7 +94,7 @@ function harness() {
                 })
             );
         });
-    return { calls, people, person, join, leave, agreed };
+    return { calls, people, visible, person, join, leave, agreed };
 }
 
 test('call keys follow MLS membership as people join and leave', async () => {
@@ -141,6 +141,41 @@ test('call keys follow MLS membership as people join and leave', async () => {
         await until(() => h.agreed([carol]), 'carol alone');
         h.join(bob);
         await until(() => h.agreed([carol, bob]), 'bob back with carol');
+    } finally {
+        await h.calls.close();
+    }
+});
+
+test('members notice someone who hung up but still holds the call keys', async () => {
+    const h = harness();
+    try {
+        const alice = await h.person();
+        const bob = await h.person();
+        h.join(alice);
+        await until(() => h.agreed([alice]), 'alice creates the group');
+        h.join(bob);
+        await until(() => h.agreed([alice, bob]), 'bob joins');
+        const roster = () =>
+            [...h.people.keys()].map((id) => ({
+                id,
+                online: true,
+                call: h.visible.get(id) ?? null,
+            }));
+        const stale = () =>
+            lingering(
+                h.people.get(alice)!.session!.members(),
+                roster(),
+                alice,
+                'room'
+            );
+        assert.deepEqual(stale(), []);
+        // Bob hangs up, but a colluding server keeps him in the group.
+        h.visible.delete(bob);
+        assert.deepEqual(stale(), [bob]);
+        // An honest departure removes him from the keys.
+        h.leave(bob);
+        await until(() => h.agreed([alice]), 'bob removed');
+        assert.deepEqual(stale(), []);
     } finally {
         await h.calls.close();
     }

@@ -38,7 +38,9 @@ export type WorkerMessage =
           member: string;
           generation: number;
           key: CryptoKey;
-      };
+      }
+    // Sending pauses for key sets older than this one.
+    | { type: 'hold'; from: number };
 export type WorkerRequest = {
     type: 'need';
     set: number;
@@ -56,6 +58,7 @@ let sets: KeySet[] = [];
 let sending: KeySet | null = null;
 let me = '';
 let nonce = 0;
+let sendFrom = 0;
 const requested = new Set<string>();
 // One replay window per sender and key set, shared by all of that sender's
 // streams. A stream the server announces again cannot replay old frames.
@@ -83,6 +86,10 @@ scope.onmessage = ({ data }) => {
         sets.find((set) => set.id === data.set)
             ?.keys.get(data.member)
             ?.set(data.generation, data.key);
+        return;
+    }
+    if (data.type === 'hold') {
+        sendFrom = data.from;
         return;
     }
     const now = Date.now();
@@ -120,7 +127,7 @@ scope.onrtctransform = ({ transformer }) => {
         controller: TransformStreamDefaultController<Frame>
     ) => {
         const set = sending;
-        if (!set || nonce > 0xffffffff) return;
+        if (!set || set.id < sendFrom || nonce > 0xffffffff) return;
         const n = nonce++;
         const k = key(set, me, generation(n));
         if (!k) return;
