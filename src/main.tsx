@@ -200,6 +200,21 @@ function Login({ state }: { state: ChatState }) {
     );
 }
 
+// Verified identity ids by lowercased name. No prototype, so names such as
+// "constructor" or "__proto__" behave like any other name.
+function verifiedIds() {
+    const ids: Record<string, string> = Object.create(null);
+    try {
+        const stored = JSON.parse(
+            localStorage.getItem('hush-verified') || '{}'
+        );
+        if (stored && typeof stored === 'object' && !Array.isArray(stored))
+            for (const [name, id] of Object.entries(stored))
+                if (typeof id === 'string') ids[name] = id;
+    } catch {}
+    return ids;
+}
+
 // One malformed message must not take down the whole conversation.
 class MessageBoundary extends React.Component<
     { children: React.ReactNode },
@@ -1323,10 +1338,7 @@ function ModalView({
                             className="primary"
                             disabled={!code}
                             onClick={() => {
-                                const stored = JSON.parse(
-                                    localStorage.getItem('hush-verified') ||
-                                        '{}'
-                                );
+                                const stored = verifiedIds();
                                 stored[modal.peer.name.toLowerCase()] =
                                     modal.peer.id;
                                 localStorage.setItem(
@@ -1706,15 +1718,7 @@ function App() {
         client.select(scope);
         setMobileNav(false);
     };
-    const verified = (() => {
-        try {
-            return JSON.parse(
-                localStorage.getItem('hush-verified') || '{}'
-            ) as Record<string, string>;
-        } catch {
-            return {};
-        }
-    })();
+    const verified = verifiedIds();
     return (
         <main className="app-shell">
             {mobileNav && (
