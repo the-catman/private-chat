@@ -1,4 +1,4 @@
-# Started by `npm run dev` and `npm start`, which read APP_ORIGIN and PORT from .env.
+# Started by `npm start`, which reads APP_ORIGIN and PORT from .env.
 {
 	admin off
 	log {

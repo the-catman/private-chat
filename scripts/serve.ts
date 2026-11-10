@@ -1,7 +1,6 @@
 // Usage: node --import=tsx scripts/serve.ts <command...>
-// Runs Caddy with the repo's Caddyfile beside the app command. Ctrl+C stops
-// both, and either one exiting stops the other. Backend restarts under
-// `tsx watch` happen inside the app command, so Caddy keeps running.
+// Runs Caddy with the repo's Caddyfile beside the app command, for
+// `npm start`. Ctrl+C stops both, and either one exiting stops the other.
 import { spawn, type ChildProcess } from 'node:child_process';
 
 const [command, ...args] = process.argv.slice(2);

@@ -4,18 +4,23 @@ End-to-end encrypted chat for small groups, with DMs, file sharing, voice/video 
 
 ## How to run
 
-Requires Node.js 22.23.4+ and [Caddy](https://caddyserver.com/), which `npm run dev` starts with the included `Caddyfile`. To let it use ports 80 and 443, run `sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"` once (and after Caddy upgrades), and stop any other Caddy.
+Requires Node.js 22.23.4+. Copy `.env.example` to `.env` if it doesn't already exist. Set `APP_PASSWORD` (at least 16 characters) and `APP_ORIGIN` (your HTTPS address).
 
-Copy `.env.example` to `.env` if it doesn't already exist. Set `APP_PASSWORD` (at least 16 characters) and `APP_ORIGIN` (your HTTPS address), then run:
+For development on this machine only, at `http://localhost:5173` (your `PORT`):
 
 ```bash
 npm ci
 npm run dev
 ```
 
-Open the address in `APP_ORIGIN`, or `http://localhost:5173` (your `PORT`) on the same machine.
+To serve `APP_ORIGIN` publicly, `npm start` runs the built app behind [Caddy](https://caddyserver.com/) with the included `Caddyfile`:
 
-Calls go through the server: open port 44444 (`MEDIA_PORT`) for UDP and TCP to this machine.
+```bash
+npm run build
+npm start
+```
+
+To let Caddy use ports 80 and 443, run `sudo setcap cap_net_bind_service=+ep "$(command -v caddy)"` once (and after Caddy upgrades), and stop any other Caddy. Calls go through the server: open port 44444 (`MEDIA_PORT`) for UDP and TCP to this machine.
 
 Project code: [MIT](LICENSE). [Third-party licenses](THIRD_PARTY_NOTICES.md).
 

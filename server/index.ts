@@ -18,7 +18,9 @@ try {
     });
     app.server.listen(config.port, '127.0.0.1', () => {
         console.log(
-            `Hush is ready at ${config.origin}, and at http://localhost:${config.port} on this machine.`
+            development
+                ? `Hush is ready at http://localhost:${config.port}. Development mode runs without Caddy, so only this machine can open it.`
+                : `Hush is ready at ${config.origin}, and at http://localhost:${config.port} on this machine.`
         );
         if (development)
             console.log(

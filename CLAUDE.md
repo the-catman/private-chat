@@ -23,11 +23,12 @@ until deletion or shutdown; there is no message database.
 - Browsers retain identity keys, preferences, and Signal session and message
   keys for the current server boot, never message contents.
 - Caddy terminates HTTPS and forwards to Node on `127.0.0.1:PORT` (5173 by
-  default). The tracked
-  `Caddyfile` reads `APP_ORIGIN` and `PORT` from `.env`; `scripts/serve.ts`
-  runs it beside the app for `npm run dev` and `npm start`; do not rely on a
-  system Caddy service. The same machine may also open `http://localhost:PORT`
-  directly; requests with forwarding headers or other hosts never count as local.
+  default). The tracked `Caddyfile` reads `APP_ORIGIN` and `PORT` from `.env`;
+  `scripts/serve.ts` runs it beside the app for `npm start`; do not rely on a
+  system Caddy service. `npm run dev` runs without Caddy, so only this machine
+  can open it at `http://localhost:PORT`. The same machine may also open that
+  address under `npm start`; requests with forwarding headers or other hosts
+  never count as local.
 
 ## Public Repository and Privacy
 
@@ -52,8 +53,9 @@ until deletion or shutdown; there is no message database.
 - Use TypeScript, four-space indentation, and the existing Prettier conventions.
 - Keep changes focused. Preserve the user's work and avoid unrelated refactors
   or new dependencies unless they materially help the task.
-- Run with `npm run dev`; do not install a user service. Keep the repo's Caddy
-  setup and localhost port unless the user asks to change them.
+- Develop with `npm run dev`; serve publicly with `npm run build` and
+  `npm start`. Do not install a user service. Keep the repo's Caddy setup and
+  localhost port unless the user asks to change them.
 - Public access must remain HTTPS-only; plain HTTP is for localhost only. Read the shared login password from
   `.env`, never from frontend source or a `VITE_` environment variable.
 - Never persist messages or files, including encrypted copies, to disk or browser
@@ -73,7 +75,8 @@ until deletion or shutdown; there is no message database.
 
 ## Development and Verification
 
-- `npm ci` installs dependencies; `npm run dev` starts Express with Vite.
+- `npm ci` installs dependencies; `npm run dev` starts Express with Vite on
+  localhost, without Caddy.
 - `npm run typecheck` checks TypeScript; `npm test` covers client/server logic.
 - Use `npm run test:browser` for relevant browser behavior, with an up-to-date
   build. `TEST_DEV=1 npm run test:browser` uses an isolated Vite copy instead.
@@ -87,4 +90,5 @@ until deletion or shutdown; there is no message database.
 - Do not restart the user's running app during routine verification. Frontend
   changes refresh through Vite; `npm run dev` restarts itself on backend or
   `.env` changes, which clears the current RAM history. Mention when an edit
-  will trigger that restart.
+  will trigger that restart. `npm start` serves the last build and does not
+  watch files.
