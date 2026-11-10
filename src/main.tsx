@@ -200,6 +200,24 @@ function Login({ state }: { state: ChatState }) {
     );
 }
 
+// One malformed message must not take down the whole conversation.
+class MessageBoundary extends React.Component<
+    { children: React.ReactNode },
+    { failed: boolean }
+> {
+    state = { failed: false };
+    static getDerivedStateFromError() {
+        return { failed: true };
+    }
+    render() {
+        return this.state.failed ? (
+            <span className="message-note">This message can’t be shown.</span>
+        ) : (
+            this.props.children
+        );
+    }
+}
+
 function VoiceNote({
     content,
 }: {
@@ -382,19 +400,23 @@ function ChatMessage({
                         close={closeEditor}
                         remove={() => remove(message)}
                     />
-                ) : message.payload.kind === 'voice' ? (
-                    <VoiceNote content={message.payload} />
-                ) : message.payload.kind === 'file' ? (
-                    <FileAttachment
-                        content={message.payload}
-                        bytes={message.bytes}
-                        progress={message.progress}
-                        sending={message.status === 'sending'}
-                        unavailable={message.unavailable}
-                        fetch={() => client.fetchFile(message.id)}
-                    />
                 ) : (
-                    <MarkdownMessage text={message.payload.text} />
+                    <MessageBoundary key={message.envelope.id}>
+                        {message.payload.kind === 'voice' ? (
+                            <VoiceNote content={message.payload} />
+                        ) : message.payload.kind === 'file' ? (
+                            <FileAttachment
+                                content={message.payload}
+                                bytes={message.bytes}
+                                progress={message.progress}
+                                sending={message.status === 'sending'}
+                                unavailable={message.unavailable}
+                                fetch={() => client.fetchFile(message.id)}
+                            />
+                        ) : (
+                            <MarkdownMessage text={message.payload.text} />
+                        )}
+                    </MessageBoundary>
                 )}
                 {message.status === 'failed' && (
                     <button

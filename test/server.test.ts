@@ -282,6 +282,30 @@ test('wrong passwords from one network cannot lock everyone else out', async () 
     }
 });
 
+test('message content that would crash or mislead the UI is refused or cleaned', () => {
+    const voice = {
+        kind: 'voice',
+        audio: 'AAAA',
+        mime: 'audio/webm',
+        duration: 1,
+    };
+    assert.equal(validateContent(voice), voice);
+    // A 4n+1 length is not valid base64 and used to crash every client.
+    assert.throws(() => validateContent({ ...voice, audio: 'AAAAA' }));
+    assert.throws(() => validateContent({ ...voice, mime: ['audio/webm'] }));
+    const file = {
+        kind: 'file',
+        name: 'report\u202efdp.exe',
+        mime: 'application/pdf',
+        size: 1,
+        hashes: ['A'.repeat(43)],
+    };
+    assert.deepEqual(validateContent(file), {
+        ...file,
+        name: 'reportfdp.exe',
+    });
+});
+
 test('only the two people in a DM call can see that it is active', async () => {
     const f = await fixture();
     try {

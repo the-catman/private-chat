@@ -1,6 +1,8 @@
 import type { Content } from '../types';
 import { MAX_FILE_BYTES, partCount } from './limits';
 
+const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
 export function validateContent(value: unknown): Content {
     if (!value || typeof value !== 'object')
         throw new Error('Invalid message.');
@@ -15,7 +17,10 @@ export function validateContent(value: unknown): Content {
         payload.kind === 'voice' &&
         typeof payload.audio === 'string' &&
         payload.audio.length <= 2_000_000 &&
+        // A length of 4n+1 is not valid base64 and would throw when played.
+        payload.audio.length % 4 !== 1 &&
         /^[A-Za-z0-9_-]+$/.test(payload.audio) &&
+        typeof payload.mime === 'string' &&
         /^audio\/(webm|ogg|mp4)(;codecs=opus)?$/.test(payload.mime) &&
         Number.isFinite(payload.duration) &&
         payload.duration >= 0 &&
@@ -38,8 +43,13 @@ export function validateContent(value: unknown): Content {
         payload.name.length <= 255 &&
         typeof payload.mime === 'string' &&
         payload.mime.length <= 128
-    )
-        return payload;
+    ) {
+        // Direction overrides could make a .exe file name read as a PDF.
+        const name = payload.name.replace(BIDI_CONTROLS, '');
+        return name === payload.name
+            ? payload
+            : { ...payload, name: name || 'file' };
+    }
     throw new Error('Invalid message or attachment.');
 }
 
