@@ -130,6 +130,33 @@ test('a one-time prekey opens one session, and forged prekeys are refused', asyn
     assert.equal(text(await bob.ratchet.open(dave, plain, 'c')), 'd');
 });
 
+test('a first message without a one-time prekey cannot open a session twice', async () => {
+    const [alice, bob] = await Promise.all([createIdentity(), create()]);
+    const saved = storage();
+    bob.ratchet = await new Ratchet(bob, saved).load();
+    const { spk } = await bob.ratchet.bundle();
+    // A relay that withholds one-time prekeys.
+    alice.ratchet.fetch = async () => ({ spk });
+    const first = await alice.ratchet.seal(bob, bytes('first'), 'c');
+    assert.equal(first.pre?.opk, undefined);
+    assert.equal(text(await bob.ratchet.open(alice, first, 'c')), 'first');
+    // New sessions push the original out of Bob's session list.
+    for (let i = 0; i < 4; i++) {
+        await alice.ratchet.restart(bob);
+        const next = await alice.ratchet.seal(bob, bytes(`n${i}`), 'c');
+        assert.equal(text(await bob.ratchet.open(alice, next, 'c')), `n${i}`);
+    }
+    await assert.rejects(
+        bob.ratchet.open(alice, first, 'c'),
+        /no longer available/
+    );
+    const reloaded = await new Ratchet(bob, saved).load();
+    await assert.rejects(
+        reloaded.open(alice, first, 'c'),
+        /no longer available/
+    );
+});
+
 test('simultaneous first messages leave both sessions working', async () => {
     const [alice, bob] = await Promise.all([
         createIdentity(),

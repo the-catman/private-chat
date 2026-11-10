@@ -33,7 +33,9 @@ type Session = {
     // Sent with every message until the responder first replies.
     pre?: RatchetKey['pre'];
 };
-type Private = Pair & { sig?: string; time: number };
+// A signed prekey lists the ephemeral keys it already answered without a
+// one-time prekey, so a replayed first message cannot start a session again.
+type Private = Pair & { sig?: string; time: number; used?: string[] };
 type Opened = { from: string; scope: string; key: Bytes };
 type Store = 'sessions' | 'prekeys' | 'opened' | 'meta';
 export type RatchetStorage = {
@@ -367,10 +369,17 @@ export class Ratchet {
                 );
                 if (!plain) continue;
                 session.pre = undefined;
-                // A one-time prekey opens exactly one session.
-                if (pre?.opk !== undefined && !known) {
+                // A one-time prekey opens exactly one session. Without one,
+                // the signed prekey remembers the ephemeral key instead.
+                if (pre && !known && pre.opk !== undefined) {
                     this.prekeys.delete(pre.opk);
                     this.storage.delete('prekeys', pre.opk);
+                } else if (pre && !known) {
+                    const spk = this.prekeys.get(pre.spk);
+                    if (spk) {
+                        spk.used = [...(spk.used || []), pre.ek];
+                        this.storage.put('prekeys', pre.spk, spk);
+                    }
                 }
                 this.promote(peer.id, session, original);
                 return plain;
@@ -429,7 +438,11 @@ export class Ratchet {
         const spk = this.prekeys.get(pre.spk);
         const opk =
             pre.opk === undefined ? undefined : this.prekeys.get(pre.opk);
-        if (!spk?.sig || (pre.opk !== undefined && (!opk || opk.sig)))
+        if (
+            !spk?.sig ||
+            spk.used?.includes(pre.ek) ||
+            (pre.opk !== undefined && (!opk || opk.sig))
+        )
             throw new RatchetError('That prekey is no longer available.');
         return {
             ad: `${peer.id}:${this.identity.id}`,
@@ -564,6 +577,7 @@ export async function browserStorage(
     await done(reset);
     let ops: [Store, IDBValidKey, unknown][] = [];
     let written = Promise.resolve();
+    let failed = false;
     const write = () => {
         const batch = ops;
         ops = [];
@@ -572,8 +586,11 @@ export async function browserStorage(
         for (const [store, key, value] of batch)
             if (value === undefined) tx.objectStore(store).delete(key);
             else tx.objectStore(store).put(value, key);
-        // A failed write is not retried; the next one still goes ahead.
-        written = done(tx).catch(() => {});
+        // A lost write would roll the ratchet back on reload and reuse a
+        // message key, so sealing stops until the page is reloaded.
+        written = done(tx).catch(() => {
+            failed = true;
+        });
     };
     const queue = (op: [Store, IDBValidKey, unknown]) => {
         if (ops.push(op) === 1) queueMicrotask(write);
@@ -602,6 +619,10 @@ export async function browserStorage(
             write();
             if (!owner()) throw new Error('Hush was opened in another tab.');
             await written;
+            if (failed)
+                throw new Error('Browser key storage failed. Reload Hush.');
+            // Another tab may have taken over while this write was running.
+            if (!owner()) throw new Error('Hush was opened in another tab.');
         },
     };
 }
