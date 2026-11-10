@@ -25,6 +25,7 @@ import {
     verify,
     prekeyText,
     signedText,
+    clearText,
 } from '../src/lib/crypto';
 import { createIdentity } from './identities';
 import { normalizeName, MAX_FILE_BYTES, PART_BYTES } from '../src/lib/limits';
@@ -72,6 +73,22 @@ function fetch(
         req.on('error', reject);
         req.end(options.body);
     });
+}
+
+// A clear request signed by the person clearing, as browsers send it.
+async function clearPacket(identity: Identity, boot: string, scope: string) {
+    const id = crypto.randomUUID();
+    const time = Date.now();
+    return {
+        type: 'clear' as const,
+        id,
+        scope,
+        time,
+        sig: await sign(
+            identity,
+            clearText(boot, id, scope, time, identity.id)
+        ),
+    };
 }
 
 const origin = 'https://chat.test';
@@ -326,6 +343,34 @@ test('only the two people in a DM call can see that it is active', async () => {
             if (call === 'room') break;
             assert.equal(call, null);
         }
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('clear requests carry their signature to everyone, and unsigned ones are refused', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        alice.ws.send(
+            JSON.stringify({
+                type: 'clear',
+                id: crypto.randomUUID(),
+                scope: 'room',
+            })
+        );
+        const [code] = await once(alice.ws, 'close');
+        assert.equal(code, 1008);
+        const bob = await f.join('Bob');
+        const clear = await clearPacket(bob.identity, f.app.boot, 'room');
+        bob.ws.send(JSON.stringify(clear));
+        const cleared = await bob.wait('cleared');
+        assert.ok(
+            cleared.type === 'cleared' &&
+                cleared.by === bob.identity.id &&
+                cleared.time === clear.time &&
+                cleared.sig === clear.sig
+        );
     } finally {
         await f.app.close();
     }
@@ -830,7 +875,7 @@ test('any room member can clear all authors and shared files, while DMs, calls a
         alice.ws.send(JSON.stringify({ type: 'call', scope: 'room' }));
         bob.ws.close();
         await once(bob.ws, 'close');
-        const clear = { type: 'clear', id: crypto.randomUUID(), scope: 'room' };
+        const clear = await clearPacket(charlie.identity, f.app.boot, 'room');
         charlie.ws.send(JSON.stringify(clear));
         await charlie.wait('ack');
         assert.equal(
@@ -885,7 +930,9 @@ test('any room member can clear all authors and shared files, while DMs, calls a
         );
         charlie.packets.length = 0;
         returned.ws.send(
-            JSON.stringify({ type: 'clear', id: crypto.randomUUID(), scope })
+            JSON.stringify(
+                await clearPacket(returned.identity, f.app.boot, scope)
+            )
         );
         await returned.wait('ack');
         assert.equal(
@@ -899,17 +946,17 @@ test('any room member can clear all authors and shared files, while DMs, calls a
         );
         // An authenticated third person still cannot clear somebody else's DM.
         charlie.ws.send(
-            JSON.stringify({ type: 'clear', id: crypto.randomUUID(), scope })
+            JSON.stringify(
+                await clearPacket(charlie.identity, f.app.boot, scope)
+            )
         );
         const [code] = await once(charlie.ws, 'close');
         assert.equal(code, 1008);
         assert.equal(f.app.stats().messages, 1);
         alice.ws.send(
-            JSON.stringify({
-                type: 'clear',
-                id: crypto.randomUUID(),
-                scope: 'room',
-            })
+            JSON.stringify(
+                await clearPacket(alice.identity, f.app.boot, 'room')
+            )
         );
         await alice.wait('ack');
         assert.equal(f.app.stats().historyBytes, 0);
@@ -1490,11 +1537,7 @@ test('interrupted, cleared, oversized and out-of-order uploads release RAM witho
         alice.ws.send(cleared.frames[0]);
         await alice.wait('progress');
         bob.ws.send(
-            JSON.stringify({
-                type: 'clear',
-                id: crypto.randomUUID(),
-                scope: 'room',
-            })
+            JSON.stringify(await clearPacket(bob.identity, f.app.boot, 'room'))
         );
         await bob.wait('ack');
         assert.equal(f.app.stats().historyBytes, 0);

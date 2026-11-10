@@ -696,7 +696,9 @@ export function createChatServer(
             if (
                 typeof packet.id !== 'string' ||
                 !UUID.test(packet.id) ||
-                !validScope(packet.scope, member.id)
+                !validScope(packet.scope, member.id) ||
+                !Number.isSafeInteger(packet.time) ||
+                !encoded(packet.sig, 86)
             )
                 return ws.close(1008, 'Invalid conversation.');
             // A retried clear must not delete messages sent after the first one.
@@ -714,11 +716,14 @@ export function createChatServer(
                 drop(id, true);
             }
             operations.add(packet.id);
+            // Clients check the signature, so this relay cannot blame anyone.
             const cleared = {
                 type: 'cleared' as const,
                 id: packet.id,
                 scope: packet.scope,
                 by: member.id,
+                time: packet.time,
+                sig: packet.sig,
             };
             clears.set(packet.scope, cleared);
             for (const person of members.values()) {

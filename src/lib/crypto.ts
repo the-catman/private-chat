@@ -137,6 +137,13 @@ export const proofText = (
     id: string,
     name: string
 ) => JSON.stringify(['hush-join-v1', origin, boot, nonce, id, name]);
+export const clearText = (
+    boot: string,
+    id: string,
+    scope: string,
+    time: number,
+    by: string
+) => JSON.stringify(['hush-clear-v1', boot, id, scope, time, by]);
 export const dmScope = (a: string, b: string) =>
     `dm:${[a, b].sort().join(':')}`;
 export const aadText = (m: Envelope) =>

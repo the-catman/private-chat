@@ -17,7 +17,9 @@ import {
     seal,
     open,
     sign,
+    verify,
     proofText,
+    clearText,
     dmScope,
     contentKey,
     openWithKey,
@@ -46,6 +48,15 @@ import {
     browserStorage,
     claimStorage,
 } from './signal.ts';
+
+// Whether this person belongs to the room or to this DM.
+const inScope = (scope: string, id: string) => {
+    const ids = scope.split(':');
+    return (
+        scope === 'room' ||
+        (ids.length === 3 && ids[0] === 'dm' && ids.slice(1).includes(id))
+    );
+};
 
 const initial = (): ChatState => ({
     phase: 'loading',
@@ -533,30 +544,75 @@ export class ChatClient {
         if (packet.type === 'cleared') {
             const marker = `${boot}:${packet.id}`;
             if (this.clears.get(packet.scope) === marker) return;
+            // Only someone in the conversation can clear it, and they sign
+            // the request, so the relay cannot wipe it or blame anyone.
+            const by = this.state.peers.find((p) => p.id === packet.by);
+            if (
+                !by ||
+                !inScope(packet.scope, packet.by) ||
+                !inScope(packet.scope, this.identity.id) ||
+                !Number.isSafeInteger(packet.time) ||
+                !(await verify(
+                    by.bundle,
+                    clearText(
+                        boot!,
+                        packet.id,
+                        packet.scope,
+                        packet.time,
+                        packet.by
+                    ),
+                    packet.sig
+                ))
+            )
+                throw new Error('Invalid clear request.');
+            if (this.clears.get(packet.scope) === marker) return;
+            // A recent clear empties the conversation. An older one, as
+            // replayed after a reconnect, only removes what came before it.
+            const recent = Math.abs(Date.now() - packet.time) <= 120_000;
+            const before = (time: number) => recent || time <= packet.time;
             this.clears.set(packet.scope, marker);
-            this.identity.ratchet.forgetScope(packet.scope);
+            const removed = this.state.messages.filter(
+                (m) => m.scope === packet.scope && before(m.time)
+            );
+            if (recent) this.identity.ratchet.forgetScope(packet.scope);
+            else
+                this.identity.ratchet.forget(
+                    removed.flatMap((m) => [
+                        m.id,
+                        m.envelope.id,
+                        m.historyGrant?.id ?? '',
+                    ])
+                );
             for (const [id, envelope] of this.pending) {
-                if (envelope.scope !== packet.scope) continue;
+                if (envelope.scope !== packet.scope || !before(envelope.time))
+                    continue;
                 this.pending.delete(id);
                 this.confirm(id, new Error('This conversation was cleared.'));
             }
             for (const map of [this.incoming, this.files])
                 for (const [id, item] of map)
-                    if (item.envelope.scope === packet.scope) map.delete(id);
+                    if (
+                        item.envelope.scope === packet.scope &&
+                        before(item.envelope.time)
+                    )
+                        map.delete(id);
             this.wakeUploads();
             this.update({
                 messages: this.state.messages.filter(
-                    (m) => m.scope !== packet.scope
+                    (m) => !removed.includes(m)
                 ),
-                presence: packet.scope === 'room' ? [] : this.state.presence,
-                unread: { ...this.state.unread, [packet.scope]: 0 },
-                typing: Object.fromEntries(
-                    Object.entries(this.state.typing).filter(
-                        ([key]) => !key.startsWith(`${packet.scope}:`)
-                    )
-                ),
+                ...(recent && {
+                    presence:
+                        packet.scope === 'room' ? [] : this.state.presence,
+                    unread: { ...this.state.unread, [packet.scope]: 0 },
+                    typing: Object.fromEntries(
+                        Object.entries(this.state.typing).filter(
+                            ([key]) => !key.startsWith(`${packet.scope}:`)
+                        )
+                    ),
+                }),
             });
-            if (this.liveHistory) {
+            if (this.liveHistory && recent) {
                 const name =
                     packet.by === this.state.self
                         ? 'You'
@@ -1064,7 +1120,18 @@ export class ChatClient {
         if (this.state.phase !== 'online')
             throw new Error('Wait until you are connected.');
         const id = crypto.randomUUID();
-        await this.confirmed({ type: 'clear', id, scope }, id);
+        const time = Date.now();
+        const sig = await sign(
+            this.identity,
+            clearText(
+                this.state.config!.boot,
+                id,
+                scope,
+                time,
+                this.identity.id
+            )
+        );
+        await this.confirmed({ type: 'clear', id, scope, time, sig }, id);
     }
     private confirmed(packet: ClientPacket, id: string) {
         return new Promise<void>((resolve, reject) => {

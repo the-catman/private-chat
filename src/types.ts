@@ -199,7 +199,14 @@ export type ServerPacket =
     | { type: 'ready'; boot: string; peers: Peer[] }
     | { type: 'peers'; peers: Peer[] }
     | { type: 'presence'; event: Presence }
-    | { type: 'cleared'; id: string; scope: string; by: string }
+    | {
+          type: 'cleared';
+          id: string;
+          scope: string;
+          by: string;
+          time: number;
+          sig: string;
+      }
     | { type: 'access'; id: string; grant: Envelope }
     | { type: 'history-end' }
     | { type: 'ack'; id: string; deleted?: boolean }
@@ -229,7 +236,8 @@ export type ClientPacket =
     | { type: 'bundle'; request: number; id: string }
     | ({ type: 'prekeys' } & Prekeys)
     | { type: 'call'; scope: string | null }
-    | { type: 'clear'; id: string; scope: string }
+    // Signed by the person clearing, so nobody else can wipe a conversation.
+    | { type: 'clear'; id: string; scope: string; time: number; sig: string }
     | { type: 'fetch'; id: string }
     | ({ type: 'media'; request: number } & MediaRequest)
     | MlsClientPacket

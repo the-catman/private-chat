@@ -8,12 +8,35 @@ import {
     b64,
     dmScope,
     partHashes,
+    sign,
+    clearText,
 } from '../src/lib/crypto';
 import { createIdentity } from './identities';
 import { Ratchet, RatchetError } from '../src/lib/signal';
 import { PART_BYTES } from '../src/lib/limits';
 import type { ClientPacket, Identity, Envelope } from '../src/types';
 import type { SoundCue } from '../src/lib/sounds';
+
+// A clear notice as the server relays it, signed by the person clearing.
+async function clearedBy(
+    identity: Identity,
+    boot: string,
+    scope: string,
+    time = Date.now()
+) {
+    const id = crypto.randomUUID();
+    return {
+        type: 'cleared' as const,
+        id,
+        scope,
+        by: identity.id,
+        time,
+        sig: await sign(
+            identity,
+            clearText(boot, id, scope, time, identity.id)
+        ),
+    };
+}
 
 function clientFor(
     identity: Identity,
@@ -92,12 +115,7 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
         client.send({ kind: 'text', text: 'Still encrypting' }),
         /conversation was cleared/
     );
-    const marker = {
-        type: 'cleared' as const,
-        id: crypto.randomUUID(),
-        scope: 'room',
-        by: bob.id,
-    };
+    const marker = await clearedBy(bob, boot, 'room');
     await client.receive(marker);
     await incoming;
     await outgoing;
@@ -412,6 +430,38 @@ test('a relay cannot place a message in another DM or roll back an edit', async 
         kind: 'text',
         text: 'v2',
     });
+});
+
+test('only a signed clear from someone in the conversation removes it, and an old one keeps newer messages', async () => {
+    const [alice, bob, carol] = await Promise.all(
+        Array.from({ length: 3 }, () => createIdentity())
+    );
+    const boot = crypto.randomUUID();
+    const { client } = clientFor(alice, [alice, bob, carol], boot);
+    const scope = dmScope(alice.id, bob.id);
+    const dm = await seal(bob, [alice, bob], boot, scope, 'chat', {
+        kind: 'text',
+        text: 'Keep this',
+    });
+    await client.receive({ type: 'message', envelope: dm, received: 1 });
+    // The relay blames Bob with someone else's signature.
+    const forged = { ...(await clearedBy(carol, boot, scope)), by: bob.id };
+    await assert.rejects(client.receive(forged), /Invalid clear/);
+    // Carol signs her own request, but she is not in this DM.
+    await assert.rejects(
+        client.receive(await clearedBy(carol, boot, scope)),
+        /Invalid clear/
+    );
+    // A clear Bob signed an hour ago, replayed now, keeps newer messages.
+    await client.receive(
+        await clearedBy(bob, boot, scope, Date.now() - 3_600_000)
+    );
+    assert.deepEqual(
+        client.state.messages.map((m) => m.id),
+        [dm.id]
+    );
+    await client.receive(await clearedBy(bob, boot, scope));
+    assert.equal(client.state.messages.length, 0);
 });
 
 test('messages follow their signed send times, and edits keep their place', async () => {
