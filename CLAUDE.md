@@ -51,6 +51,7 @@ until deletion or shutdown; there is no message database.
 ## Project Rules
 
 - Use TypeScript, four-space indentation, and the existing Prettier conventions.
+- Commit directly to main; no branches.
 - Keep changes focused. Preserve the user's work and avoid unrelated refactors
   or new dependencies unless they materially help the task.
 - Develop with `npm run dev`; serve publicly with `npm run build` and
