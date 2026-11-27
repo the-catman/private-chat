@@ -1,0 +1,261 @@
+/* Statuses, avatars and profiles. */
+.status-dot {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--online);
+}
+.status-dot.idle {
+    background: #e0a045;
+}
+.status-dot.dnd {
+    background: var(--danger);
+}
+.status-dot.offline,
+.status-dot.invisible {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--muted);
+}
+.avatar .status-dot {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--sidebar);
+    box-sizing: content-box;
+    margin: -2px;
+}
+.avatar .status-dot.offline,
+.avatar .status-dot.invisible {
+    background: var(--sidebar);
+    box-shadow: inset 0 0 0 2.5px var(--muted);
+}
+.members-panel .avatar .status-dot,
+.members-panel .avatar .status-dot.offline,
+.members-panel .avatar .status-dot.invisible {
+    border-color: var(--bg);
+}
+.avatar.large .status-dot {
+    width: 16px;
+    height: 16px;
+    border-width: 3px;
+    right: 0;
+    bottom: 0;
+}
+.avatar.tiny .status-dot {
+    display: none;
+}
+.avatar.has-image {
+    background: var(--panel-2);
+}
+.avatar img {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    object-fit: cover;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+/* A message's avatar and name open the author's profile. */
+.avatar-button {
+    display: flex;
+    align-self: flex-start;
+    padding: 0;
+    border-radius: 50%;
+    cursor: pointer;
+}
+.author-name button {
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.author-name button:hover {
+    text-decoration: underline;
+}
+
+.self-status {
+    display: flex;
+    flex: 1;
+    gap: 9px;
+    align-items: center;
+    min-width: 0;
+    margin: -6px;
+    padding: 6px;
+    border-radius: 9px;
+    text-align: left;
+    color: inherit;
+}
+.self-status:hover,
+.self-status[aria-expanded='true'] {
+    background: var(--hover);
+}
+.self-status > span:last-child {
+    min-width: 0;
+    flex: 1;
+}
+.self-status small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dm-row small,
+.member-main > span > small,
+.conversation-title > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.member-item.away .member-main {
+    opacity: 0.6;
+}
+.member-item.away .member-main:hover,
+.member-item.away .member-main:focus-visible {
+    opacity: 1;
+}
+.presence-event.renamed > svg {
+    color: var(--accent);
+}
+
+.status-choice svg circle {
+    fill: var(--online);
+    stroke: none;
+}
+.status-choice.dnd svg circle {
+    fill: var(--danger);
+}
+.status-choice.invisible svg circle {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 3;
+}
+.message-menu button[aria-checked='true'] {
+    font-weight: 650;
+}
+.message-menu button[aria-checked='true']::after {
+    content: '✓';
+    margin-left: auto;
+    color: var(--accent);
+}
+
+.profile-card {
+    position: fixed;
+    z-index: 70;
+    width: min(280px, calc(100vw - 16px));
+    padding: 18px;
+    display: grid;
+    justify-items: start;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    outline: none;
+}
+.profile-card .avatar {
+    margin-bottom: 6px;
+}
+.profile-card .avatar .status-dot {
+    border-color: var(--panel);
+}
+.profile-card h3 {
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 1.125rem;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+}
+.profile-card h3 small {
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+}
+.profile-status {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+.profile-text {
+    margin: 4px 0 0;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+.profile-verified {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--online);
+    font-size: 0.75rem;
+}
+.profile-card .key-changed {
+    padding: 0;
+}
+.profile-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    width: 100%;
+}
+.profile-actions button {
+    flex: 1;
+    padding: 9px 12px;
+    border-radius: 8px;
+    font-size: 0.875rem;
+}
+.profile-actions .small-primary {
+    color: var(--on-accent);
+    background: var(--accent-solid);
+}
+
+.profile-dialog .modal-content {
+    display: block;
+}
+.profile-dialog h2 {
+    margin-top: 0;
+}
+.profile-picture {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.profile-picture .avatar {
+    margin-right: 6px;
+}
+.profile-dialog label {
+    display: block;
+    margin: 16px 0 6px;
+    font-size: 0.875rem;
+    font-weight: 550;
+}
+.profile-dialog input:not([type='file']) {
+    width: 100%;
+    padding: 10px 12px;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 1rem;
+}
+.profile-dialog input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    outline: none;
+}
+.profile-dialog .small-text {
+    margin: 12px 0 0;
+}
+.profile-dialog .dialog-actions {
+    margin-top: 20px;
+}

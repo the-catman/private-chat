@@ -385,6 +385,9 @@ export function CallPanel({
                                     <Avatar
                                         id={person.id}
                                         name={person.name}
+                                        image={
+                                            state.profiles[person.id]?.avatar
+                                        }
                                         size="large"
                                     />
                                 </div>

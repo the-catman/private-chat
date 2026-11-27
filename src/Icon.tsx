@@ -127,6 +127,7 @@ const paths: Record<string, React.ReactNode> = {
     arrowDown: <path d="M12 4v16m-6-6 6 6 6-6" />,
     reply: <path d="M9 15 4 10l5-5M4 10h10a6 6 0 0 1 6 6v3" />,
     pin: <path d="M9 3h6l-1 6 3.5 3.5V15h-11v-2.5L10 9zM12 15v6" />,
+    status: <circle cx="12" cy="12" r="6" />,
     chevron: <path d="m8 5 7 7-7 7" />,
     copy: (
         <>

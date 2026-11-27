@@ -11,7 +11,21 @@ import { ChatClient } from './lib/client';
 import { b64, unb64, dmScope, safetyCode, partHashes } from './lib/crypto';
 import { Icon } from './Icon';
 import type { Peer, ChatState, Content, Message, Reaction } from './types';
-import { Avatar, IconButton, color, minutes } from './components/Common';
+import {
+    Avatar,
+    IconButton,
+    color,
+    minutes,
+    shownStatus,
+    statusLabels,
+    type Shown,
+} from './components/Common';
+import {
+    ProfileCard,
+    ProfileDialog,
+    type Verification,
+} from './components/Profile';
+import { storedProfile } from './lib/profile';
 import { CallPanel } from './components/CallPanel';
 import { AppearanceControls } from './components/Appearance';
 import { EmojiPicker } from './components/EmojiPicker';
@@ -52,6 +66,7 @@ import './components/call.css';
 import './components/chat-qol.css';
 import './components/message-tools.css';
 import './components/mobile.css';
+import './components/profile.css';
 import { installSoundActivation, playSound } from './lib/sounds';
 import { captureMicrophone } from './lib/microphone';
 
@@ -138,6 +153,16 @@ function verifiedIds() {
                 if (typeof id === 'string') ids[name] = id;
     } catch {}
     return ids;
+}
+// A verified person stays verified after a rename. Someone else using a
+// verified name gets a warning, whoever had it first.
+function verification(
+    verified: Record<string, string>,
+    peer: Peer
+): Verification {
+    const holder = verified[peer.name.toLowerCase()];
+    if (holder) return holder === peer.id ? 'verified' : 'changed';
+    return Object.values(verified).includes(peer.id) ? 'verified' : null;
 }
 
 // One malformed message must not take down the whole conversation.
@@ -229,6 +254,8 @@ type MessageContext = {
     names: string[];
     online: boolean;
     nameOf: (id: string) => string;
+    avatarOf: (id: string) => string | undefined;
+    profile: (id: string, anchor: HTMLElement) => void;
     react: (message: Message, trigger: HTMLElement) => void;
     reply: (message: Message) => void;
     jump: (id: string) => void;
@@ -354,7 +381,21 @@ function ChatMessage({
                     )}
                 </span>
             ) : (
-                <Avatar id={message.from} name={message.name} />
+                <button
+                    type="button"
+                    className="avatar-button"
+                    aria-label={`Profile: ${message.name}`}
+                    tabIndex={-1}
+                    onClick={(event) =>
+                        context.profile(message.from, event.currentTarget)
+                    }
+                >
+                    <Avatar
+                        id={message.from}
+                        name={message.name}
+                        image={context.avatarOf(message.from)}
+                    />
+                </button>
             )}
             <div className="message-main">
                 {reply && <ReplyQuote parent={parent} jump={context.jump} />}
@@ -369,7 +410,17 @@ function ChatMessage({
                             } as React.CSSProperties
                         }
                     >
-                        {message.name}
+                        <button
+                            type="button"
+                            onClick={(event) =>
+                                context.profile(
+                                    message.from,
+                                    event.currentTarget
+                                )
+                            }
+                        >
+                            {message.name}
+                        </button>
                     </strong>
                     <time dateTime={new Date(message.time).toISOString()}>
                         {clock(message.time)}
@@ -637,9 +688,9 @@ function Composer({
         setFile(picked);
         setEmojis(false);
     };
+    // DMs to someone offline wait on the server until they return.
     const offline =
-        state.phase !== 'online' ||
-        (state.scope !== 'room' && !recipient?.online);
+        state.phase !== 'online' || (state.scope !== 'room' && !recipient);
     useEffect(() => {
         if (!suggestions && !mention) return;
         const dismiss = (event: PointerEvent) => {
@@ -1447,9 +1498,10 @@ function ModalView({
                             </div>
                         </div>
                         <div className="privacy-note">
-                            The server sees display names and connection
-                            details. To be sure who you are talking to, compare
-                            safety codes over another trusted channel.
+                            The server sees display names, statuses and
+                            connection details, but not profile pictures or
+                            status text. To be sure who you are talking to,
+                            compare safety codes over another trusted channel.
                         </div>
                         <button className="primary" onClick={dismiss}>
                             OK
@@ -1538,6 +1590,16 @@ function App() {
     } | null>(null);
     const [pinsOpen, setPinsOpen] = useState(false);
     const pinTrigger = useRef<HTMLSpanElement>(null);
+    const [profileCard, setProfileCard] = useState<{
+        id: string;
+        anchor: HTMLElement;
+    } | null>(null);
+    const [profileOpen, setProfileOpen] = useState(false);
+    const [statusMenu, setStatusMenu] = useState<{
+        x: number;
+        y: number;
+    } | null>(null);
+    const statusTrigger = useRef<HTMLButtonElement>(null);
     // The people who can be mentioned here, stable while they stay the same.
     const mentionKey = state.peers
         .filter(
@@ -1593,11 +1655,33 @@ function App() {
             window.removeEventListener('pagehide', clear);
         };
     }, []);
+    // Any input here counts as activity; none for a while shows as idle.
+    useEffect(() => {
+        const active = () => client.active();
+        const events = [
+            'pointerdown',
+            'pointermove',
+            'keydown',
+            'wheel',
+            'focus',
+        ] as const;
+        for (const name of events)
+            window.addEventListener(name, active, {
+                capture: true,
+                passive: true,
+            });
+        active();
+        return () => {
+            for (const name of events)
+                window.removeEventListener(name, active, { capture: true });
+        };
+    }, []);
     useEffect(() => {
         nearBottom.current = true;
         setAtLatest(true);
         setPinsOpen(false);
         setReacting(null);
+        setProfileCard(null);
         setSearch('');
         setSearchOpen(false);
         setSelected([]);
@@ -1711,6 +1795,20 @@ function App() {
     const self = state.self!;
     const online = state.peers.filter((p) => p.online);
     const others = state.peers.filter((p) => p.id !== self);
+    const ownStatus: Shown =
+        state.phase !== 'online'
+            ? 'offline'
+            : state.status === 'online' && state.idle
+              ? 'idle'
+              : state.status;
+    const shown = (peer: Peer | undefined) =>
+        peer?.id === self ? ownStatus : shownStatus(peer, self);
+    const avatarOf = (id: string) => state.profiles[id]?.avatar;
+    // A status text, or how available someone is when that is not obvious.
+    const statusLine = (peer: Peer) =>
+        state.profiles[peer.id]?.text || statusLabels[shown(peer)];
+    const visible = state.peers.filter((p) => shown(p) !== 'offline');
+    const away = others.filter((p) => shown(p) === 'offline');
     const recipient =
         state.scope !== 'room'
             ? state.peers.find(
@@ -1878,10 +1976,37 @@ function App() {
         names: mentionNames,
         online: state.phase === 'online',
         nameOf,
+        avatarOf,
+        profile: (id, anchor) =>
+            setProfileCard((open) =>
+                open?.anchor === anchor ? null : { id, anchor }
+            ),
         react: (message, anchor) => setReacting({ id: message.id, anchor }),
         reply: startReply,
         jump: jumpTo,
     };
+    const statusActions: MenuAction[] = [
+        ...(['online', 'dnd', 'invisible'] as const).map((status) => ({
+            label: statusLabels[status],
+            icon: 'status',
+            className: `status-choice ${status}`,
+            checked: state.status === status,
+            hint:
+                status === 'dnd'
+                    ? 'Silences message and call sounds'
+                    : status === 'invisible'
+                      ? 'You appear offline but can still chat'
+                      : undefined,
+            run: () => client.setStatus(status),
+        })),
+        {
+            label: 'Edit profile',
+            icon: 'edit',
+            run: () => setProfileOpen(true),
+        },
+    ];
+    const cardPeer =
+        profileCard && state.peers.find((p) => p.id === profileCard.id);
     const menuMessage = state.messages.find((m) => m.id === menu?.id);
     const menuReady =
         menuMessage?.status === 'sent' && state.phase === 'online';
@@ -2021,7 +2146,8 @@ function App() {
     );
     const dmPeers = others.filter(
         (p) =>
-            p.online ||
+            shown(p) !== 'offline' ||
+            dmScope(self, p.id) === state.scope ||
             state.messages.some((m) => m.scope === dmScope(self, p.id))
     );
     const select = (scope: string) => {
@@ -2052,7 +2178,7 @@ function App() {
                     <div>
                         <h1>Hush</h1>
                         <span>
-                            <i className="online-dot" /> {online.length} online
+                            <i className="online-dot" /> {visible.length} online
                         </span>
                     </div>
                     <IconButton
@@ -2108,6 +2234,7 @@ function App() {
                                     <Avatar
                                         name={p.name}
                                         id={p.id}
+                                        image={avatarOf(p.id)}
                                         size="tiny"
                                     />
                                     {p.name}
@@ -2130,16 +2257,15 @@ function App() {
                                     <Avatar
                                         id={p.id}
                                         name={p.name}
-                                        online={p.online}
+                                        image={avatarOf(p.id)}
+                                        status={shown(p)}
                                     />
                                     <span>
                                         {p.name}
                                         <small>
                                             {p.call === scope
                                                 ? 'In a call'
-                                                : p.online
-                                                  ? 'Online'
-                                                  : 'Offline'}
+                                                : statusLine(p)}
                                         </small>
                                     </span>
                                     {Boolean(state.unread[scope]) && (
@@ -2178,17 +2304,36 @@ function App() {
                     </div>
                 )}
                 <div className="self-row">
-                    <Avatar
-                        name={state.name}
-                        id={self}
-                        online={state.phase === 'online'}
-                    />
-                    <div>
-                        <strong>{state.name}</strong>
-                        {state.phase !== 'online' && (
-                            <small>Reconnecting…</small>
-                        )}
-                    </div>
+                    <button
+                        ref={statusTrigger}
+                        className="self-status"
+                        aria-label={`Status: ${statusLabels[ownStatus]}. Change status or profile`}
+                        aria-haspopup="menu"
+                        aria-expanded={Boolean(statusMenu)}
+                        onClick={(event) => {
+                            const box =
+                                event.currentTarget.getBoundingClientRect();
+                            setStatusMenu((open) =>
+                                open ? null : { x: box.left, y: box.top }
+                            );
+                        }}
+                    >
+                        <Avatar
+                            name={state.name}
+                            id={self}
+                            image={avatarOf(self)}
+                            status={ownStatus}
+                        />
+                        <span>
+                            <strong>{state.name}</strong>
+                            <small>
+                                {state.phase !== 'online'
+                                    ? 'Reconnecting…'
+                                    : state.profiles[self]?.text ||
+                                      statusLabels[ownStatus]}
+                            </small>
+                        </span>
+                    </button>
                     <IconButton
                         icon="logout"
                         label="Log out"
@@ -2209,7 +2354,11 @@ function App() {
                     </span>
                     <div className="conversation-title">
                         <h2>{title}</h2>
-                        {recipient && !recipient.online && <span>Offline</span>}
+                        {recipient &&
+                            (state.profiles[recipient.id]?.text ||
+                                shown(recipient) !== 'online') && (
+                                <span>{statusLine(recipient)}</span>
+                            )}
                     </div>
                     <div className="header-actions">
                         <IconButton
@@ -2217,7 +2366,9 @@ function App() {
                             label="Start voice call"
                             disabled={
                                 state.phase !== 'online' ||
-                                Boolean(recipient && !recipient.online)
+                                Boolean(
+                                    recipient && shown(recipient) === 'offline'
+                                )
                             }
                             onClick={() => void client.joinCall(state.scope)}
                         />
@@ -2228,7 +2379,10 @@ function App() {
                                     label="Start video call"
                                     disabled={
                                         state.phase !== 'online' ||
-                                        Boolean(recipient && !recipient.online)
+                                        Boolean(
+                                            recipient &&
+                                            shown(recipient) === 'offline'
+                                        )
                                     }
                                     onClick={() =>
                                         void client.joinCall(state.scope, true)
@@ -2291,7 +2445,8 @@ function App() {
                                                   state.phase !== 'online' ||
                                                   Boolean(
                                                       recipient &&
-                                                      !recipient.online
+                                                      shown(recipient) ===
+                                                          'offline'
                                                   ),
                                               run: () =>
                                                   void client.joinCall(
@@ -2543,16 +2698,31 @@ function App() {
                                                     item.event.action ===
                                                     'joined'
                                                         ? 'arrow'
-                                                        : 'logout'
+                                                        : item.event.action ===
+                                                            'renamed'
+                                                          ? 'edit'
+                                                          : 'logout'
                                                 }
                                                 size={15}
                                             />
-                                            <span>
-                                                <strong>
-                                                    {item.event.name}
-                                                </strong>{' '}
-                                                {item.event.action}
-                                            </span>
+                                            {item.event.action === 'renamed' ? (
+                                                <span>
+                                                    <strong>
+                                                        {item.event.previous}
+                                                    </strong>{' '}
+                                                    is now{' '}
+                                                    <strong>
+                                                        {item.event.name}
+                                                    </strong>
+                                                </span>
+                                            ) : (
+                                                <span>
+                                                    <strong>
+                                                        {item.event.name}
+                                                    </strong>{' '}
+                                                    {item.event.action}
+                                                </span>
+                                            )}
                                             <time
                                                 dateTime={new Date(
                                                     item.time
@@ -2710,56 +2880,91 @@ function App() {
                     <div className="members-header">
                         <Icon name="people" size={17} />
                         <h2>Members</h2>
-                        <span>{online.length}</span>
+                        <span>{visible.length}</span>
                     </div>
-                    <div className="section-caption">
-                        Online — {online.length}
-                    </div>
-                    {online.map((p) => (
-                        <div className="member-item" key={p.id}>
-                            <button
-                                className="member-main"
-                                onClick={() => {
-                                    if (p.id !== self)
-                                        select(dmScope(self, p.id));
-                                }}
-                                disabled={p.id === self}
-                            >
-                                <Avatar name={p.name} id={p.id} online />
-                                <span>
-                                    <strong>
-                                        {p.name}
-                                        {p.id === self && <small>you</small>}
-                                    </strong>
-                                    <small>
-                                        {p.call ? 'In a call' : 'Online'}
-                                    </small>
-                                </span>
-                            </button>
-                            {p.id !== self && (
-                                <ParticipantVolume id={p.id} name={p.name} />
-                            )}
-                            {p.id !== self && (
-                                <IconButton
-                                    icon="shield"
-                                    label={`Verify ${p.name}`}
-                                    active={
-                                        verified[p.name.toLowerCase()] === p.id
-                                    }
-                                    onClick={() =>
-                                        setModal({ type: 'safety', peer: p })
-                                    }
-                                />
-                            )}
-                            {p.id !== self &&
-                                verified[p.name.toLowerCase()] &&
-                                verified[p.name.toLowerCase()] !== p.id && (
-                                    <span className="key-changed">
-                                        Encryption key changed — verify again
-                                    </span>
-                                )}
-                        </div>
-                    ))}
+                    {[
+                        ['Online', visible],
+                        ['Offline', away],
+                    ].map(
+                        ([caption, people]) =>
+                            people.length > 0 && (
+                                <React.Fragment key={caption as string}>
+                                    <div className="section-caption">
+                                        {caption as string} — {people.length}
+                                    </div>
+                                    {(people as Peer[]).map((p) => (
+                                        <div
+                                            className={`member-item ${shown(p) === 'offline' ? 'away' : ''}`}
+                                            key={p.id}
+                                        >
+                                            <button
+                                                className="member-main"
+                                                aria-haspopup="dialog"
+                                                onClick={(event) =>
+                                                    setProfileCard({
+                                                        id: p.id,
+                                                        anchor: event.currentTarget,
+                                                    })
+                                                }
+                                            >
+                                                <Avatar
+                                                    name={p.name}
+                                                    id={p.id}
+                                                    image={avatarOf(p.id)}
+                                                    status={shown(p)}
+                                                />
+                                                <span>
+                                                    <strong>
+                                                        {p.name}
+                                                        {p.id === self && (
+                                                            <small>you</small>
+                                                        )}
+                                                    </strong>
+                                                    <small>
+                                                        {p.call &&
+                                                        shown(p) !== 'offline'
+                                                            ? 'In a call'
+                                                            : statusLine(p)}
+                                                    </small>
+                                                </span>
+                                            </button>
+                                            {p.id !== self && p.online && (
+                                                <ParticipantVolume
+                                                    id={p.id}
+                                                    name={p.name}
+                                                />
+                                            )}
+                                            {p.id !== self && (
+                                                <IconButton
+                                                    icon="shield"
+                                                    label={`Verify ${p.name}`}
+                                                    active={
+                                                        verification(
+                                                            verified,
+                                                            p
+                                                        ) === 'verified'
+                                                    }
+                                                    onClick={() =>
+                                                        setModal({
+                                                            type: 'safety',
+                                                            peer: p,
+                                                        })
+                                                    }
+                                                />
+                                            )}
+                                            {p.id !== self &&
+                                                verification(verified, p) ===
+                                                    'changed' && (
+                                                    <span className="key-changed">
+                                                        Encryption key changed —
+                                                        verify again
+                                                    </span>
+                                                )}
+                                        </div>
+                                    ))}
+                                </React.Fragment>
+                            )
+                    )}
                 </aside>
             )}
             {modal && (
@@ -2775,6 +2980,63 @@ function App() {
                     y={menu.y}
                     actions={menuActions}
                     close={closeMenu}
+                />
+            )}
+            {statusMenu && (
+                <MessageMenu
+                    x={statusMenu.x}
+                    y={statusMenu.y}
+                    above
+                    label="Status"
+                    actions={statusActions}
+                    close={() => {
+                        setStatusMenu(null);
+                        statusTrigger.current?.focus({ preventScroll: true });
+                    }}
+                />
+            )}
+            {profileCard && cardPeer && (
+                <ProfileCard
+                    peer={cardPeer}
+                    profile={state.profiles[cardPeer.id]}
+                    status={shown(cardPeer)}
+                    self={cardPeer.id === self}
+                    verification={
+                        cardPeer.id === self
+                            ? null
+                            : verification(verifiedIds(), cardPeer)
+                    }
+                    anchor={profileCard.anchor}
+                    message={
+                        cardPeer.id === self
+                            ? undefined
+                            : () => {
+                                  setProfileCard(null);
+                                  select(dmScope(self, cardPeer.id));
+                              }
+                    }
+                    edit={
+                        cardPeer.id === self
+                            ? () => {
+                                  setProfileCard(null);
+                                  setProfileOpen(true);
+                              }
+                            : undefined
+                    }
+                    close={(restoreFocus) => {
+                        setProfileCard(null);
+                        if (restoreFocus)
+                            profileCard.anchor.focus({ preventScroll: true });
+                    }}
+                />
+            )}
+            {profileOpen && (
+                <ProfileDialog
+                    id={self}
+                    name={state.name}
+                    profile={storedProfile()}
+                    client={client}
+                    close={() => setProfileOpen(false)}
                 />
             )}
             {reacting && (

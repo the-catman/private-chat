@@ -55,6 +55,7 @@ function clientFor(
             bundle: peer.bundle,
             name: peer.id,
             online: true,
+            status: 'online' as const,
             call: null,
         })),
         config: {
@@ -821,4 +822,150 @@ test('reactions toggle in order, keep the newest signed set, and go with their m
     assert.equal(client.state.reactions[original.id], undefined);
     assert.equal(client.state.pins[original.id], undefined);
     clearTimeout(client.noticeTimer);
+});
+
+test('profiles keep the newest signed version and reach newcomers; renames, do not disturb, invisible typing and offline DMs behave', async () => {
+    // Profiles and statuses are preferences kept in browser storage.
+    const memory = new Map<string, string>();
+    globalThis.localStorage ??= {
+        getItem: (key: string) => memory.get(key) ?? null,
+        setItem: (key: string, value: string) => memory.set(key, value),
+        removeItem: (key: string) => memory.delete(key),
+    } as unknown as Storage;
+    const [alice, bob, carol] = await Promise.all(
+        Array.from({ length: 3 }, () => createIdentity())
+    );
+    const boot = crypto.randomUUID();
+    const cues: SoundCue[] = [];
+    const { client, sent } = clientFor(alice, [alice, bob], boot, (cue) =>
+        cues.push(cue)
+    );
+    client.wire = (packet: ClientPacket) => {
+        if (packet.type !== 'envelope') return;
+        sent.push(packet.envelope);
+        queueMicrotask(async () => {
+            if (packet.envelope.type === 'profile')
+                await client.receive({
+                    type: 'message',
+                    envelope: packet.envelope,
+                    received: Date.now(),
+                });
+            await client.receive({ type: 'ack', id: packet.envelope.id });
+        });
+    };
+    const profile = (text: string, scope = 'room') =>
+        seal(bob, [alice, bob], boot, scope, 'profile', {
+            kind: 'profile',
+            text,
+        });
+    const older = await profile('Away');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const newer = await profile('Back');
+    for (const envelope of [newer, older])
+        await client.receive({ type: 'message', envelope, received: 1 });
+    assert.equal(client.state.profiles[bob.id]?.text, 'Back');
+    await assert.rejects(
+        client.receive({
+            type: 'message',
+            envelope: await profile('Two\nlines'),
+            received: 2,
+        }),
+        /Invalid profile/
+    );
+    await assert.rejects(
+        client.receive({
+            type: 'message',
+            envelope: await profile('Private', dmScope(alice.id, bob.id)),
+            received: 2,
+        }),
+        /Invalid profile/
+    );
+
+    // Alice's own profile goes to everyone, and again to someone new.
+    await client.receive({ type: 'history-end' });
+    const png = b64(
+        Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6b2sAAAAASUVORK5CYII=',
+            'base64'
+        )
+    );
+    await client.setProfile({ text: '  Out to lunch ', avatar: png });
+    const profiles = () => sent.filter((e) => e.type === 'profile');
+    assert.equal(profiles().length, 1);
+    assert.deepEqual(
+        Object.keys(profiles()[0]!.keys).sort(),
+        [alice.id, bob.id].sort()
+    );
+    assert.equal(client.state.profiles[alice.id]?.text, 'Out to lunch');
+    assert.match(
+        client.state.profiles[alice.id]?.avatar || '',
+        /^data:image\/png;base64,/
+    );
+    await client.setProfile({ text: 'Out to lunch', avatar: png });
+    assert.equal(profiles().length, 1, 'an unchanged profile is not resent');
+    const everyone = [alice, bob, carol].map((peer) => ({
+        id: peer.id,
+        bundle: peer.bundle,
+        name: peer === bob ? 'Robert' : peer.id,
+        online: true,
+        status: 'online' as const,
+        call: null,
+    }));
+    const chat = await seal(bob, [alice, bob], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'Hello',
+    });
+    await client.receive({ type: 'message', envelope: chat, received: 3 });
+    await client.receive({ type: 'peers', peers: everyone });
+    const start = Date.now();
+    while (profiles().length < 2 && Date.now() - start < 3000)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(Object.hasOwn(profiles()[1]!.keys, carol.id));
+    // Messages show the name their author uses now.
+    assert.equal(
+        client.state.messages.find((m) => m.id === chat.id)?.name,
+        'Robert'
+    );
+
+    // Do not disturb silences other people's messages.
+    client.setStatus('dnd');
+    cues.length = 0;
+    const quiet = await seal(bob, [alice, bob], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'Shh',
+    });
+    await client.receive({ type: 'message', envelope: quiet, received: 4 });
+    assert.deepEqual(cues, []);
+    client.setStatus('online');
+    const loud = await seal(bob, [alice, bob], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'Hey',
+    });
+    await client.receive({ type: 'message', envelope: loud, received: 5 });
+    assert.deepEqual(cues, ['received']);
+
+    // Invisible people do not show that they are typing.
+    client.setStatus('invisible');
+    const before = sent.length;
+    await client.typing();
+    assert.equal(sent.length, before);
+    client.setStatus('online');
+
+    // A DM may wait for someone offline; calls and room messages may not.
+    await client.receive({
+        type: 'peers',
+        peers: everyone.map((p) =>
+            p.id === carol.id ? { ...p, online: false } : p
+        ),
+    });
+    const dm = dmScope(alice.id, carol.id);
+    assert.throws(() => client.recipients(dm), /offline/);
+    assert.deepEqual(
+        client.recipients(dm, true).map((p) => p.id),
+        [alice.id, carol.id]
+    );
+    assert.deepEqual(
+        client.recipients('room', true).map((p) => p.id),
+        [alice.id, bob.id]
+    );
 });

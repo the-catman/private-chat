@@ -1,5 +1,22 @@
 import type React from 'react';
 import { Icon } from '../Icon';
+import type { Peer } from '../types';
+
+// What others see. Invisible people appear offline to everyone else.
+export type Shown = 'online' | 'idle' | 'dnd' | 'offline' | 'invisible';
+export const statusLabels: Record<Shown, string> = {
+    online: 'Online',
+    idle: 'Idle',
+    dnd: 'Do not disturb',
+    offline: 'Offline',
+    invisible: 'Invisible',
+};
+export function shownStatus(peer: Peer | undefined, self: string): Shown {
+    if (!peer?.online) return 'offline';
+    if (peer.status === 'invisible')
+        return peer.id === self ? 'invisible' : 'offline';
+    return peer.status;
+}
 
 const initials = (name: string) =>
     Array.from(name.trim()).slice(0, 2).join('').toUpperCase();
@@ -23,23 +40,27 @@ export const minutes = (value: number) =>
 export function Avatar({
     name,
     id,
-    online,
+    status,
+    image,
     size = '',
 }: {
     name: string;
     id: string;
-    online?: boolean;
+    status?: Shown;
+    image?: string;
     size?: string;
 }) {
     return (
         <span
-            className={`avatar ${size}`}
+            className={`avatar ${size} ${image ? 'has-image' : ''}`}
             style={{ '--avatar-color': color(id) } as React.CSSProperties}
         >
-            {initials(name)}
-            {online !== undefined && (
-                <i className={online ? 'online-dot' : 'offline-dot'} />
+            {image ? (
+                <img src={image} alt="" draggable={false} />
+            ) : (
+                initials(name)
             )}
+            {status && <i className={`status-dot ${status}`} />}
         </span>
     );
 }

@@ -1,5 +1,12 @@
 import type { Content } from '../types';
-import { MAX_FILE_BYTES, MAX_REACTIONS, partCount } from './limits';
+import {
+    AVATAR_BYTES,
+    MAX_FILE_BYTES,
+    MAX_REACTIONS,
+    MAX_STATUS_TEXT,
+    partCount,
+} from './limits';
+import { imageType } from './image-type';
 
 const UUID =
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -101,4 +108,50 @@ export function validatePin(value: unknown) {
     )
         throw new Error('Invalid pin.');
     return pin.pinned;
+}
+
+// One line of status text, without control or direction-override characters.
+export const statusText = (text: string) =>
+    text
+        .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim()
+        .slice(0, MAX_STATUS_TEXT);
+
+// A profile's avatar arrives as base64url image bytes. Only the bytes decide
+// the image type, and the result is a data: URL for an <img>.
+export function validateProfile(value: unknown) {
+    const profile = value as {
+        kind?: unknown;
+        text?: unknown;
+        avatar?: unknown;
+    };
+    if (
+        !profile ||
+        typeof profile !== 'object' ||
+        profile.kind !== 'profile' ||
+        typeof profile.text !== 'string' ||
+        profile.text !== statusText(profile.text) ||
+        (profile.avatar !== undefined &&
+            (typeof profile.avatar !== 'string' ||
+                profile.avatar.length > Math.ceil((AVATAR_BYTES * 4) / 3) ||
+                profile.avatar.length % 4 === 1 ||
+                !/^[A-Za-z0-9_-]+$/.test(profile.avatar)))
+    )
+        throw new Error('Invalid profile.');
+    if (profile.avatar === undefined) return { text: profile.text };
+    const avatar = avatarUrl(profile.avatar);
+    if (!avatar) throw new Error('Invalid profile picture.');
+    return { text: profile.text, avatar };
+}
+export function avatarUrl(data: string) {
+    const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
+    try {
+        const head = atob(base64.slice(0, 16));
+        const mime = imageType(Uint8Array.from(head, (c) => c.charCodeAt(0)));
+        if (!mime) return null;
+        return `data:${mime};base64,${base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')}`;
+    } catch {
+        return null;
+    }
 }

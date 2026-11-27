@@ -23,9 +23,14 @@ export type RatchetKey = {
     pre?: { ek: string; spk: number; opk?: number };
 };
 export type Recipient = { id: string; bundle: Bundle };
+// What someone chose to show. Invisible people stay connected, because
+// messages must still be encrypted for them, but appear offline.
+export type Status = 'online' | 'idle' | 'dnd' | 'invisible';
 export type Peer = Recipient & {
     name: string;
+    // Connected right now, whatever their status says.
     online: boolean;
+    status: Status;
     call: string | null;
 };
 export type Envelope = {
@@ -42,7 +47,8 @@ export type Envelope = {
         | 'delete'
         | 'share'
         | 'react'
-        | 'pin';
+        | 'pin'
+        | 'profile';
     targets?: string[];
     revision?: string;
     parts?: number;
@@ -99,11 +105,20 @@ export type Pin = {
     time: number;
     envelope: string;
 };
+// Status text and an avatar, end-to-end encrypted to everyone in the room.
+export type Profile = {
+    text: string;
+    // A data: URL of the small, already resized avatar image.
+    avatar?: string;
+    time: number;
+    envelope: string;
+};
 export type Presence = {
     id: string;
     userId: string;
     name: string;
-    action: 'joined' | 'left';
+    action: 'joined' | 'left' | 'renamed';
+    previous?: string;
     time: number;
 };
 export type SessionConfig = {
@@ -231,6 +246,10 @@ export type ChatState = {
     // By message ID, then by author.
     reactions: Record<string, Record<string, Reaction>>;
     pins: Record<string, Pin>;
+    profiles: Record<string, Profile>;
+    // The status this person chose; idle is added automatically.
+    status: Exclude<Status, 'idle'>;
+    idle: boolean;
     config: SessionConfig | null;
     call: CallState | null;
 };
@@ -272,7 +291,10 @@ export type ClientPacket =
           name: string;
           sig: string;
           prekeys: Prekeys;
+          status?: Status;
       }
+    | { type: 'status'; status: Status }
+    | { type: 'rename'; id: string; name: string }
     | { type: 'bundle'; request: number; id: string }
     | ({ type: 'prekeys' } & Prekeys)
     | { type: 'call'; scope: string | null }

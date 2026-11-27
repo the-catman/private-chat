@@ -11,6 +11,7 @@ import type {
     CallState,
     MediaState,
     PrekeyBundle,
+    Status,
 } from '../types';
 import type { SoundCue } from './sounds';
 import {
@@ -40,8 +41,24 @@ import {
     AUTO_FETCH_BYTES,
     PROTOCOL,
     MAX_REACTIONS,
+    validName,
 } from './limits.ts';
-import { validateContent, validatePin, validateReaction } from './content.ts';
+import {
+    avatarUrl,
+    statusText,
+    validateContent,
+    validatePin,
+    validateProfile,
+    validateReaction,
+} from './content.ts';
+import {
+    storedProfile,
+    storedStatus,
+    storeProfile,
+    storeStatus,
+    type OwnProfile,
+    type OwnStatus,
+} from './profile.ts';
 import { replaceEmoji } from './emoji.ts';
 import { CallEngine } from './rtc.ts';
 import {
@@ -99,15 +116,25 @@ const initial = (): ChatState => ({
     unread: {},
     reactions: {},
     pins: {},
+    profiles: {},
+    status: storedStatus(),
+    idle: false,
     config: null,
     call: null,
 });
+
+// No input for this long marks someone idle.
+const IDLE_MS = 10 * 60_000;
+// Do not disturb silences what other people do, not your own actions.
+const DISTURBING: SoundCue[] = ['received', 'join', 'leave', 'ring'];
 
 export class ChatClient {
     constructor(private readonly sound: (cue: SoundCue) => void = () => {}) {}
     private liveHistory = false;
     private cue(cue: SoundCue) {
-        if (!this.state.call?.deafened) this.sound(cue);
+        if (this.state.call?.deafened) return;
+        if (this.state.status === 'dnd' && DISTURBING.includes(cue)) return;
+        this.sound(cue);
     }
     private resumeCall = storedCall();
     private rememberCall(call: CallState) {
@@ -318,7 +345,8 @@ export class ChatClient {
         if (this.state.config?.boot !== config.boot) {
             this.pending.clear();
             this.seen.clear();
-            this.update({ messages: [], presence: [] });
+            this.sharedProfile = undefined;
+            this.update({ messages: [], presence: [], profiles: {} });
         }
         this.identity = await (navigator.locks
             ? navigator.locks.request('hush-identity', loadIdentity)
@@ -523,7 +551,7 @@ export class ChatClient {
         const boot = this.state.config?.boot;
         const contentScope =
             packet.type === 'message' &&
-            !['signal', 'typing'].includes(packet.envelope.type)
+            !['signal', 'typing', 'profile'].includes(packet.envelope.type)
                 ? packet.envelope.scope
                 : undefined;
         const clearMarker = contentScope && this.clears.get(contentScope);
@@ -557,6 +585,7 @@ export class ChatClient {
                 name: this.state.name,
                 sig: signature,
                 prekeys,
+                status: this.shownStatus(),
             });
         }
         if (packet.type === 'prekeys') {
@@ -590,14 +619,20 @@ export class ChatClient {
             return;
         }
         if (packet.type === 'presence') {
-            if (this.liveHistory && packet.event.userId !== this.state.self)
+            const renamed = packet.event.action === 'renamed';
+            if (
+                this.liveHistory &&
+                !renamed &&
+                packet.event.userId !== this.state.self
+            )
                 this.cue(packet.event.action === 'joined' ? 'join' : 'leave');
             this.update({
                 presence: [...this.state.presence, packet.event].slice(-200),
             });
             if (
                 packet.event.userId !== this.state.self &&
-                this.state.scope !== 'room'
+                this.state.scope !== 'room' &&
+                !renamed
             )
                 this.notify(
                     `${packet.event.name} ${packet.event.action} the room.`
@@ -728,8 +763,26 @@ export class ChatClient {
                 )
             )
                 this.cue('ring');
-            this.update({ peers: packet.peers });
+            // Messages show the name their author uses now.
+            const names = new Map(packet.peers.map((p) => [p.id, p.name]));
+            const renamed = this.state.messages.some(
+                (m) => names.has(m.from) && names.get(m.from) !== m.name
+            );
+            this.update({
+                peers: packet.peers,
+                ...(renamed && {
+                    messages: this.state.messages.map((m) =>
+                        names.has(m.from) && names.get(m.from) !== m.name
+                            ? { ...m, name: names.get(m.from)! }
+                            : m
+                    ),
+                }),
+                ...(names.has(this.identity.id) && {
+                    name: names.get(this.identity.id)!,
+                }),
+            });
             this.rtc?.sync(packet.peers);
+            if (this.liveHistory) void this.shareProfile();
             return;
         }
         if (packet.type === 'history-end') {
@@ -740,6 +793,7 @@ export class ChatClient {
                     this.transmit(envelope);
             // Not awaited: joining waits on replies this queue delivers.
             void this.rejoinCall();
+            void this.shareProfile();
             return;
         }
         if (packet.type === 'progress') {
@@ -882,6 +936,22 @@ export class ChatClient {
                 ...this.withoutNotes(
                     this.state.messages.filter(removed).map((item) => item.id)
                 ),
+            });
+            return;
+        }
+        if (m.type === 'profile') {
+            if (m.scope !== 'room') throw new Error('Invalid profile.');
+            const profile = validateProfile(decrypted);
+            const previous = this.state.profiles[m.from];
+            if (previous && previous.time > m.time) return;
+            if (previous && previous.envelope !== m.id)
+                this.identity.ratchet.forget([previous.envelope]);
+            if (m.from === this.identity.id) this.sharedProfile = m;
+            this.update({
+                profiles: {
+                    ...this.state.profiles,
+                    [m.from]: { ...profile, time: m.time, envelope: m.id },
+                },
             });
             return;
         }
@@ -1055,7 +1125,10 @@ export class ChatClient {
             message.from !== this.identity.id
         )
             unread[message.scope] = (unread[message.scope] || 0) + 1;
-        this.update({ messages, unread });
+        // Someone who just sent a message has stopped typing it.
+        const typing = { ...this.state.typing };
+        delete typing[`${message.scope}:${message.from}`];
+        this.update({ messages, unread, typing });
         if (
             payload.kind === 'file' &&
             !bytes &&
@@ -1477,13 +1550,15 @@ export class ChatClient {
         }
     }
 
-    recipients(scope: string) {
+    // Room messages go to whoever is connected. A DM may also wait on the
+    // server for someone offline, when `offline` allows it.
+    recipients(scope: string, offline = false) {
         if (this.state.phase !== 'online')
             throw new Error('Wait until you are connected.');
         const self = { id: this.identity.id, bundle: this.identity.bundle };
         const others = this.state.peers.filter(
             (p) =>
-                p.online &&
+                (p.online || (offline && scope !== 'room')) &&
                 p.id !== self.id &&
                 (scope === 'room' || dmScope(self.id, p.id) === scope)
         );
@@ -1509,7 +1584,7 @@ export class ChatClient {
         const clearMarker = this.clears.get(scope);
         const envelope = await seal(
             this.identity,
-            this.recipients(scope),
+            this.recipients(scope, true),
             this.state.config!.boot,
             scope,
             'chat',
@@ -1569,6 +1644,7 @@ export class ChatClient {
         }
     }
     async typing() {
+        if (this.state.status === 'invisible') return;
         if (Date.now() - (this.lastTyping || 0) < 2200) return;
         this.lastTyping = Date.now();
         try {
@@ -1699,6 +1775,109 @@ export class ChatClient {
         try {
             this.wire({ type: 'call', scope: null });
         } catch {}
+    }
+    // Others see idle in place of online after a while without input.
+    private shownStatus(): Status {
+        return this.state.status === 'online' && this.state.idle
+            ? 'idle'
+            : this.state.status;
+    }
+    private sendStatus() {
+        if (this.state.phase !== 'online') return;
+        try {
+            this.wire({ type: 'status', status: this.shownStatus() });
+        } catch {}
+    }
+    setStatus(status: OwnStatus) {
+        storeStatus(status);
+        this.update({ status });
+        this.sendStatus();
+    }
+    private idleTimer?: ReturnType<typeof setTimeout>;
+    private lastActive = 0;
+    // Called on input. Nobody goes idle in a call, where talking is activity.
+    active() {
+        const now = Date.now();
+        if (!this.state.idle && now - this.lastActive < 5000) return;
+        this.lastActive = now;
+        clearTimeout(this.idleTimer);
+        const wait = () => {
+            this.idleTimer = setTimeout(() => {
+                if (this.state.call) return wait();
+                this.update({ idle: true });
+                this.sendStatus();
+            }, IDLE_MS);
+        };
+        wait();
+        if (this.state.idle) {
+            this.update({ idle: false });
+            this.sendStatus();
+        }
+    }
+    async rename(name: string) {
+        const next = normalizeName(name);
+        if (!validName(next))
+            throw new Error('Choose a name of 1–32 characters.');
+        if (next === this.state.name) return;
+        if (this.state.phase !== 'online')
+            throw new Error('Wait until you are connected.');
+        const id = crypto.randomUUID();
+        await this.confirmed({ type: 'rename', id, name: next }, id);
+        try {
+            localStorage.setItem('hush-name', next);
+        } catch {}
+        this.update({ name: next });
+    }
+    // Saved in this browser first, so it is sent again after a reconnect.
+    async setProfile(profile: OwnProfile) {
+        const next = {
+            text: statusText(profile.text),
+            ...(profile.avatar && { avatar: profile.avatar }),
+        };
+        validateProfile({ kind: 'profile', ...next });
+        storeProfile(next);
+        await this.shareProfile(true);
+    }
+    // The latest own profile the server holds, and who can read it.
+    private sharedProfile?: Envelope;
+    private profiles = Promise.resolve();
+    // Sends the saved profile to everyone, if anyone lacks its latest
+    // version: after a server restart, when someone new arrives, or after an
+    // edit. Edits report errors; background updates retry on the next change.
+    private shareProfile(edited = false) {
+        const run = this.profiles.then(async () => {
+            if (this.state.phase !== 'online' || !this.liveHistory) return;
+            let own = storedProfile();
+            try {
+                validateProfile({ kind: 'profile', ...own });
+            } catch {
+                own = { text: own.text };
+            }
+            const empty = !own.text && !own.avatar;
+            const shared = this.state.profiles[this.identity.id];
+            const current = shared
+                ? shared.text === own.text &&
+                  shared.avatar === (own.avatar && avatarUrl(own.avatar))
+                : empty;
+            const everyone =
+                this.sharedProfile &&
+                this.state.peers.every((p) =>
+                    Object.hasOwn(this.sharedProfile!.keys, p.id)
+                );
+            if (current && (empty || everyone)) return;
+            await this.commit(
+                await seal(
+                    this.identity,
+                    this.state.peers,
+                    this.state.config!.boot,
+                    'room',
+                    'profile',
+                    { kind: 'profile', ...own }
+                )
+            );
+        });
+        this.profiles = run.catch(() => {});
+        return edited ? run : this.profiles;
     }
     async logout() {
         this.stopped = true;

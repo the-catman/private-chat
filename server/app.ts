@@ -23,6 +23,7 @@ import type {
     Prekey,
     Prekeys,
     ServerPacket,
+    Status,
 } from '../src/types';
 import { resolve } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -114,7 +115,13 @@ type Member = {
     // Public Signal prekeys. Each one-time key is handed out only once.
     prekeys: Prekeys;
     replenishing: boolean;
+    status: Status;
+    // The latest encrypted status text and avatar, kept across reconnects.
+    profile: Envelope | null;
+    changes: { start: number; count: number };
 };
+
+const STATUSES: Status[] = ['online', 'idle', 'dnd', 'invisible'];
 
 const ID = /^[A-Za-z0-9_-]{43}$/;
 const UUID =
@@ -197,6 +204,7 @@ export function createChatServer(
         name: member.name,
         bundle: member.bundle,
         online: Boolean(member.ws),
+        status: member.status,
         call:
             member.call && validScope(member.call, viewer) ? member.call : null,
     });
@@ -542,6 +550,7 @@ export function createChatServer(
                 'share',
                 'react',
                 'pin',
+                'profile',
             ].includes(m.type) ||
             !Number.isSafeInteger(m.time)
         )
@@ -557,7 +566,7 @@ export function createChatServer(
         if (
             !ids.length ||
             ids.length >
-                (['edit', 'delete', 'react', 'pin'].includes(m.type)
+                (['edit', 'delete', 'react', 'pin', 'profile'].includes(m.type)
                     ? 256
                     : config.maxClients) ||
             !ids.includes(from)
@@ -570,6 +579,7 @@ export function createChatServer(
             return false;
         if (m.type === 'signal' && (m.scope === 'room' || ids.length !== 2))
             return false;
+        if (m.type === 'profile' && m.scope !== 'room') return false;
         if (!['chat', 'edit'].includes(m.type) && m.data.length > 100_000)
             return false;
         if (['react', 'pin'].includes(m.type) && m.data.length > 2048)
@@ -650,10 +660,13 @@ export function createChatServer(
                 !ID.test(packet.id) ||
                 typeof packet.name !== 'string' ||
                 packet.name.length > 64 ||
-                !validName(normalizeName(packet.name))
+                !validName(normalizeName(packet.name)) ||
+                (packet.status !== undefined &&
+                    !STATUSES.includes(packet.status))
             )
                 return ws.close(1008, 'Choose a name of 1–32 characters.');
             const name = normalizeName(packet.name);
+            const status = packet.status ?? 'online';
             if (
                 (await identityId(packet.bundle)) !== packet.id ||
                 !(await verify(
@@ -725,22 +738,37 @@ export function createChatServer(
                     })),
                 },
                 replenishing: false,
+                status,
+                profile: existing?.profile ?? null,
+                changes: existing?.changes ?? { start: 0, count: 0 },
             });
             send(ws, { type: 'ready', boot, peers: peers(packet.id) });
             for (const cleared of clears.values()) {
                 if (validScope(cleared.scope, packet.id)) send(ws, cleared);
             }
+            for (const person of members.values())
+                if (
+                    person.profile &&
+                    Object.hasOwn(person.profile.keys, packet.id)
+                )
+                    send(ws, {
+                        type: 'message',
+                        envelope: person.profile,
+                        received: person.profile.time,
+                    });
             broadcastPeers();
-            broadcast({
-                type: 'presence',
-                event: {
-                    id: randomUUID(),
-                    userId: packet.id,
-                    name,
-                    action: 'joined',
-                    time: Date.now(),
-                },
-            });
+            // Invisible people come and go without a notice.
+            if (status !== 'invisible')
+                broadcast({
+                    type: 'presence',
+                    event: {
+                        id: randomUUID(),
+                        userId: packet.id,
+                        name,
+                        action: 'joined',
+                        time: Date.now(),
+                    },
+                });
             // Deliver bounded chunks so a large history does not fill a socket queue.
             ws.historyIterator = history.values();
             pumpHistory(ws);
@@ -785,6 +813,69 @@ export function createChatServer(
             for (const person of members.values()) {
                 if (person.ws && validScope(packet.scope, person.id))
                     send(person.ws, cleared);
+            }
+            return send(ws, { type: 'ack', id: packet.id });
+        }
+        if (packet.type === 'status' || packet.type === 'rename') {
+            // Status changes and renames reach everyone, so they are rate limited.
+            const now = Date.now();
+            if (now - member.changes.start > 60_000)
+                member.changes = { start: now, count: 0 };
+            if (++member.changes.count > 30)
+                return ws.close(1008, 'Too many profile changes.');
+        }
+        if (packet.type === 'status') {
+            if (!STATUSES.includes(packet.status))
+                return ws.close(1008, 'Invalid status.');
+            if (member.status === packet.status) return;
+            member.status = packet.status;
+            broadcastPeers();
+            return;
+        }
+        if (packet.type === 'rename') {
+            if (
+                typeof packet.id !== 'string' ||
+                !UUID.test(packet.id) ||
+                typeof packet.name !== 'string' ||
+                packet.name.length > 64 ||
+                !validName(normalizeName(packet.name))
+            )
+                return ws.close(1008, 'Choose a name of 1–32 characters.');
+            const name = normalizeName(packet.name);
+            const owner = nameOwners.get(nameKey(name));
+            if (owner && owner !== member.id)
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'That name is taken. Choose another.',
+                });
+            if (!owner && nameOwners.size >= 1024)
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'Name limit reached. Restart the server to reset.',
+                });
+            const previous = member.name;
+            // The old name becomes free. Anyone who verified this person
+            // sees a warning if someone else takes it.
+            if (nameKey(previous) !== nameKey(name))
+                nameOwners.delete(nameKey(previous));
+            nameOwners.set(nameKey(name), member.id);
+            member.name = name;
+            if (previous !== name) {
+                broadcastPeers();
+                if (member.status !== 'invisible')
+                    broadcast({
+                        type: 'presence',
+                        event: {
+                            id: randomUUID(),
+                            userId: member.id,
+                            name,
+                            previous,
+                            action: 'renamed',
+                            time: Date.now(),
+                        },
+                    });
             }
             return send(ws, { type: 'ack', id: packet.id });
         }
@@ -1044,6 +1135,28 @@ export function createChatServer(
             record.bytes += delta;
             historyBytes += delta;
             for (const id of record.audience) {
+                const target = members.get(id)?.ws;
+                if (target)
+                    send(target, {
+                        type: 'message',
+                        envelope: m,
+                        received: Date.now(),
+                    });
+            }
+        } else if (m.type === 'profile') {
+            // Only the latest profile is kept, for the people it was
+            // encrypted to. Someone new gets it when its author re-sends it.
+            if (keys.some((id) => !members.has(id)))
+                return fail('Someone left. Please try again.');
+            const previous = member.profile;
+            const delta = size - (previous ? envelopeBytes(previous) : 0);
+            if (full(delta))
+                return fail(
+                    'Server memory is full. Delete some messages first.'
+                );
+            member.profile = m;
+            historyBytes += delta;
+            for (const id of keys) {
                 const target = members.get(id)?.ws;
                 if (target)
                     send(target, {
@@ -1329,16 +1442,17 @@ export function createChatServer(
                 member.call = null;
                 calls.leave(member.id);
                 broadcastPeers();
-                broadcast({
-                    type: 'presence',
-                    event: {
-                        id: randomUUID(),
-                        userId: member.id,
-                        name: member.name,
-                        action: 'left',
-                        time: Date.now(),
-                    },
-                });
+                if (member.status !== 'invisible')
+                    broadcast({
+                        type: 'presence',
+                        event: {
+                            id: randomUUID(),
+                            userId: member.id,
+                            name: member.name,
+                            action: 'left',
+                            time: Date.now(),
+                        },
+                    });
             }
         });
     });

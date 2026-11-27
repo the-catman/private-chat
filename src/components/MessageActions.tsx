@@ -14,6 +14,9 @@ export type MenuAction = {
     danger?: boolean;
     disabled?: boolean;
     hint?: string;
+    // For a choice among several, such as a status.
+    checked?: boolean;
+    className?: string;
 };
 export function MessageMenu({
     x,
@@ -21,12 +24,15 @@ export function MessageMenu({
     actions,
     close,
     label = 'Message actions',
+    above = false,
 }: {
     x: number;
     y: number;
     actions: MenuAction[];
     close: () => void;
     label?: string;
+    // Open upward from y, for controls at the bottom of the window.
+    above?: boolean;
 }) {
     const mobile = useMobileLayout();
     const ref = useRef<HTMLDivElement>(null);
@@ -45,13 +51,18 @@ export function MessageMenu({
         if (mobile) dialog.current?.showModal();
         else {
             const box = menu.getBoundingClientRect();
+            const top = above ? y - box.height - 6 : y;
             menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - box.width - 8))}px`;
-            menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - box.height - 8))}px`;
+            menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - box.height - 8))}px`;
         }
-        menu.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({
+        (
+            menu.querySelector<HTMLButtonElement>(
+                'button[aria-checked="true"]:not(:disabled)'
+            ) || menu.querySelector<HTMLButtonElement>('button:not(:disabled)')
+        )?.focus({
             preventScroll: true,
         });
-    }, [x, y, mobile]);
+    }, [x, y, mobile, above]);
     useEffect(() => {
         const dismiss = (event: PointerEvent) => {
             const boundary = mobile ? dialog.current : ref.current;
@@ -112,9 +123,14 @@ export function MessageMenu({
         >
             {actions.map((action) => (
                 <button
-                    role="menuitem"
+                    role={
+                        action.checked === undefined
+                            ? 'menuitem'
+                            : 'menuitemradio'
+                    }
+                    aria-checked={action.checked}
                     key={action.label}
-                    className={action.danger ? 'destructive-text' : ''}
+                    className={`${action.danger ? 'destructive-text' : ''} ${action.className || ''}`}
                     disabled={action.disabled}
                     title={action.hint}
                     onClick={() => {

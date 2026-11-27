@@ -30,7 +30,13 @@ import {
 import { createIdentity } from './identities';
 import { normalizeName, MAX_FILE_BYTES, PART_BYTES } from '../src/lib/limits';
 import { validateContent } from '../src/lib/content';
-import type { Identity, ServerPacket, Envelope } from '../src/types';
+import type {
+    Identity,
+    ServerPacket,
+    Envelope,
+    Peer,
+    Status,
+} from '../src/types';
 import { request } from 'node:http';
 
 // Use the native HTTP client so Host can emulate Caddy's upstream requests.
@@ -125,7 +131,8 @@ async function fixture() {
         name: string,
         identity?: Identity,
         cookie?: string,
-        rejected = false
+        rejected = false,
+        status?: Status
     ) {
         identity ||= await createIdentity();
         cookie ||= await login();
@@ -170,6 +177,7 @@ async function fixture() {
                     )
                 ),
                 prekeys: await identity.ratchet.publish(20),
+                ...(status && { status }),
             })
         );
         if (rejected) {
@@ -1837,6 +1845,194 @@ test('reactions and pins reach only the message audience, keep only the latest, 
         );
         const [code] = await once(charlie.ws, 'close');
         assert.equal(code, 1008);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('invisible people come and go quietly, statuses and renames reach everyone, and DMs wait for someone offline', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join(
+            'Bob',
+            undefined,
+            undefined,
+            false,
+            'invisible'
+        );
+        const peersOf = async (person: Participant, id: string) => {
+            const start = Date.now();
+            while (Date.now() - start < 3000) {
+                const latest = [...person.packets]
+                    .reverse()
+                    .find((p) => p.type === 'peers');
+                const peer =
+                    latest?.type === 'peers' &&
+                    latest.peers.find((p: Peer) => p.id === id);
+                if (peer) return peer;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            throw new Error('Missing peer');
+        };
+        const notices = (person: Participant, id: string) =>
+            person.packets.filter(
+                (p) => p.type === 'presence' && p.event.userId === id
+            );
+        // Others must still encrypt to an invisible person, so they know
+        // Bob is connected, but nobody is told he arrived.
+        const hidden = await peersOf(alice, bob.identity.id);
+        assert.equal(hidden.online, true);
+        assert.equal(hidden.status, 'invisible');
+        assert.equal(notices(alice, bob.identity.id).length, 0);
+
+        const status = async (person: Participant, value: string) =>
+            person.ws.send(JSON.stringify({ type: 'status', status: value }));
+        await status(bob, 'dnd');
+        await (async () => {
+            const start = Date.now();
+            while ((await peersOf(alice, bob.identity.id)).status !== 'dnd')
+                if (Date.now() - start > 3000) throw new Error('No status');
+                else await new Promise((resolve) => setTimeout(resolve, 10));
+        })();
+
+        // A name in use is refused; a free one moves, releasing the old one.
+        const rename = async (person: Participant, name: string) => {
+            const id = randomUUID();
+            person.ws.send(JSON.stringify({ type: 'rename', id, name }));
+            const begin = Date.now();
+            let index = -1;
+            while (index === -1) {
+                if (Date.now() - begin > 3000) throw new Error('No answer');
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                index = person.packets.findIndex(
+                    (p) =>
+                        (p.type === 'ack' || p.type === 'error') && p.id === id
+                );
+            }
+            const packet = person.packets.splice(index, 1)[0]!;
+            return packet;
+        };
+        const taken = await rename(bob, ' alice ');
+        assert.equal(taken.type, 'error');
+        assert.equal((await rename(bob, 'Robert')).type, 'ack');
+        assert.equal((await peersOf(alice, bob.identity.id)).name, 'Robert');
+        let renamed = await alice.wait('presence');
+        while (
+            renamed.type !== 'presence' ||
+            renamed.event.userId !== bob.identity.id
+        )
+            renamed = await alice.wait('presence');
+        assert.equal(renamed.event.action, 'renamed');
+        assert.equal(renamed.event.previous, 'Bob');
+        assert.equal(renamed.event.name, 'Robert');
+        assert.equal(
+            (await f.join('robert', undefined, undefined, true)).code,
+            4004
+        );
+        const newBob = await f.join('Bob');
+        assert.equal(newBob.code, 0);
+
+        // A DM to someone offline waits for them.
+        newBob.ws.close();
+        await once(newBob.ws, 'close');
+        const note = await seal(
+            alice.identity,
+            [alice.identity, newBob.identity],
+            f.app.boot,
+            dmScope(alice.identity.id, newBob.identity.id),
+            'chat',
+            { kind: 'text', text: 'For when you are back' }
+        );
+        await transmit(alice, note);
+        const back = await f.join('Bob', newBob.identity, newBob.cookie);
+        const waiting = back.packets.find((p) => p.type === 'message');
+        assert.ok(waiting?.type === 'message');
+        assert.equal(waiting.envelope.id, note.id);
+
+        // Going invisible and leaving announces nothing either.
+        await status(bob, 'invisible');
+        await (async () => {
+            const start = Date.now();
+            while (
+                (await peersOf(alice, bob.identity.id)).status !== 'invisible'
+            )
+                if (Date.now() - start > 3000) throw new Error('No status');
+                else await new Promise((resolve) => setTimeout(resolve, 10));
+        })();
+        bob.ws.close();
+        await once(bob.ws, 'close');
+        assert.equal((await peersOf(alice, bob.identity.id)).online, true);
+        await (async () => {
+            const start = Date.now();
+            while ((await peersOf(alice, bob.identity.id)).online)
+                if (Date.now() - start > 3000) throw new Error('Still online');
+                else await new Promise((resolve) => setTimeout(resolve, 10));
+        })();
+        assert.equal(
+            notices(alice, bob.identity.id).filter(
+                (p) => p.type === 'presence' && p.event.action === 'left'
+            ).length,
+            0
+        );
+        // Unknown statuses close the connection.
+        await status(back, 'away');
+        assert.equal((await once(back.ws, 'close'))[0], 1008);
+    } finally {
+        await f.app.close();
+    }
+});
+
+test('profiles reach only the people they were encrypted for, keep only the latest, and return after a reconnect', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const profile = (audience: Identity[], text: string, scope = 'room') =>
+            seal(bob.identity, audience, f.app.boot, scope, 'profile', {
+                kind: 'profile',
+                text,
+            });
+        const first = await profile([alice.identity, bob.identity], 'Away');
+        await transmit(bob, first);
+        assert.equal((await delivered(alice)).envelope.id, first.id);
+        assert.equal((await delivered(bob)).envelope.id, first.id);
+        // Someone new cannot read the old one, so it is not sent to them.
+        const carol = await f.join('Carol');
+        assert.equal(
+            carol.packets.some(
+                (p) => p.type === 'message' && p.envelope.id === first.id
+            ),
+            false
+        );
+        const second = await profile(
+            [alice.identity, bob.identity, carol.identity],
+            'Back'
+        );
+        await transmit(bob, second);
+        const seen = await delivered(carol);
+        assert.deepEqual(
+            await open(carol.identity, bob.identity, f.app.boot, seen.envelope),
+            { kind: 'profile', text: 'Back' }
+        );
+        // Only the latest is replayed.
+        alice.ws.close();
+        await once(alice.ws, 'close');
+        const returned = await f.join('Alice', alice.identity, alice.cookie);
+        assert.deepEqual(
+            returned.packets
+                .filter((p) => p.type === 'message')
+                .map((p) => p.type === 'message' && p.envelope.id),
+            [second.id]
+        );
+        // Profiles belong to the room, never a DM.
+        const leaked = await profile(
+            [alice.identity, bob.identity],
+            'Secret',
+            dmScope(alice.identity.id, bob.identity.id)
+        );
+        bob.ws.send(JSON.stringify({ type: 'envelope', envelope: leaked }));
+        assert.equal((await once(bob.ws, 'close'))[0], 1008);
     } finally {
         await f.app.close();
     }
