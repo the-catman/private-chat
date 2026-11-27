@@ -2037,3 +2037,113 @@ test('profiles reach only the people they were encrypted for, keep only the late
         await f.app.close();
     }
 });
+
+test('anyone can create and delete channels; text channels take messages, voice channels take calls, and deletion is signed', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const answer = async (person: Participant, id: string) => {
+            const start = Date.now();
+            for (;;) {
+                const index = person.packets.findIndex(
+                    (p) =>
+                        (p.type === 'ack' || p.type === 'error') && p.id === id
+                );
+                if (index !== -1) return person.packets.splice(index, 1)[0]!;
+                if (Date.now() - start > 3000) throw new Error('No answer');
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+        };
+        const create = async (kind: string, name: string) => {
+            const id = randomUUID();
+            alice.ws.send(JSON.stringify({ type: 'channel', id, kind, name }));
+            return answer(alice, id);
+        };
+        assert.equal((await create('text', 'plans')).type, 'ack');
+        assert.equal((await create('voice', 'hangout')).type, 'ack');
+        // Names are unique per kind, and the built-in ones are taken.
+        assert.equal((await create('text', ' PLANS ')).type, 'error');
+        assert.equal((await create('text', 'General')).type, 'error');
+        assert.equal((await create('voice', 'plans')).type, 'ack');
+        let listed: ServerPacket | undefined;
+        while (listed?.type !== 'channels' || listed.channels.length !== 3)
+            listed = await bob.wait('channels');
+        const [plans, hangout] = listed.channels;
+        assert.deepEqual(
+            [plans!.kind, plans!.name, hangout!.kind, hangout!.name],
+            ['text', 'plans', 'voice', 'hangout']
+        );
+
+        // Messages go to text channels, never voice channels.
+        const everyone = [alice.identity, bob.identity];
+        const note = await seal(
+            alice.identity,
+            everyone,
+            f.app.boot,
+            plans!.scope,
+            'chat',
+            { kind: 'text', text: 'Saturday?' }
+        );
+        await transmit(alice, note);
+        assert.equal((await delivered(bob)).envelope.scope, plans!.scope);
+
+        // Calls go to voice channels.
+        const callOf = (packet: ServerPacket | undefined) =>
+            packet?.type === 'peers'
+                ? packet.peers.find((p) => p.id === bob.identity.id)?.call
+                : undefined;
+        bob.ws.send(JSON.stringify({ type: 'call', scope: hangout!.scope }));
+        while (callOf(await alice.wait('peers')) !== hangout!.scope);
+        // A voice channel in use cannot be deleted.
+        const busy = await clearPacket(
+            alice.identity,
+            f.app.boot,
+            hangout!.scope
+        );
+        alice.ws.send(JSON.stringify({ ...busy, remove: true }));
+        const refused = await answer(alice, busy.id);
+        assert.equal(refused.type, 'error');
+        bob.ws.send(JSON.stringify({ type: 'call', scope: null }));
+        while (callOf(await alice.wait('peers')) !== null);
+
+        // Deleting a text channel clears it under the deleter's signature.
+        const removal = await clearPacket(
+            bob.identity,
+            f.app.boot,
+            plans!.scope
+        );
+        bob.ws.send(JSON.stringify({ ...removal, remove: true }));
+        assert.equal((await answer(bob, removal.id)).type, 'ack');
+        const cleared = await alice.wait('cleared');
+        assert.ok(
+            cleared.type === 'cleared' &&
+                cleared.scope === plans!.scope &&
+                cleared.by === bob.identity.id &&
+                cleared.sig === removal.sig
+        );
+        while (
+            listed?.type !== 'channels' ||
+            listed.channels.some((c) => c.scope === plans!.scope)
+        )
+            listed = await alice.wait('channels');
+        assert.equal(f.app.stats().messages, 0);
+        // A deleted channel takes no more messages.
+        const late = await seal(
+            alice.identity,
+            everyone,
+            f.app.boot,
+            plans!.scope,
+            'chat',
+            { kind: 'text', text: 'Anyone?' }
+        );
+        alice.ws.send(JSON.stringify({ type: 'envelope', envelope: late }));
+        assert.equal((await once(alice.ws, 'close'))[0], 1008);
+        // #general cannot be deleted.
+        const general = await clearPacket(bob.identity, f.app.boot, 'room');
+        bob.ws.send(JSON.stringify({ ...general, remove: true }));
+        assert.equal((await once(bob.ws, 'close'))[0], 1008);
+    } finally {
+        await f.app.close();
+    }
+});

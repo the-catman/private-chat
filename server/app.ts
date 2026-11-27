@@ -24,6 +24,7 @@ import type {
     Prekeys,
     ServerPacket,
     Status,
+    Channel,
 } from '../src/types';
 import { resolve } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -33,6 +34,7 @@ import {
     proofText,
     signedText,
     dmScope,
+    channelScope,
     prekeyText,
     VERSION,
 } from '../src/lib/crypto.ts';
@@ -122,6 +124,7 @@ type Member = {
 };
 
 const STATUSES: Status[] = ['online', 'idle', 'dnd', 'invisible'];
+const MAX_CHANNELS = 50;
 
 const ID = /^[A-Za-z0-9_-]{43}$/;
 const UUID =
@@ -175,6 +178,8 @@ export function createChatServer(
         Extract<ServerPacket, { type: 'cleared' }>
     >();
     const nameOwners = new Map<string, string>();
+    // Channels anyone created, by scope, in the order they were made.
+    const channels = new Map<string, Channel>();
     const attempts = new Map<string, { start: number; count: number }>();
     let historyBytes = 0;
     let globalAttempts = { start: Date.now(), count: 0 };
@@ -224,6 +229,8 @@ export function createChatServer(
         for (const member of members.values())
             if (member.ws) send(member.ws, payload);
     };
+    const broadcastChannels = () =>
+        broadcast({ type: 'channels', channels: [...channels.values()] });
     const broadcastPeers = () => {
         for (const member of members.values())
             if (member.ws)
@@ -521,8 +528,16 @@ export function createChatServer(
         });
     });
 
-    function validScope(scope: unknown, from: string): scope is string {
+    // A conversation this person belongs to. Messages go to text channels
+    // and calls to voice channels; 'room' is both, as are DMs.
+    function validScope(
+        scope: unknown,
+        from: string,
+        kind?: Channel['kind']
+    ): scope is string {
         if (scope === 'room') return true;
+        const channel = typeof scope === 'string' && channels.get(scope);
+        if (channel) return !kind || channel.kind === kind;
         const ids = typeof scope === 'string' ? scope.split(':') : [];
         return (
             ids.length === 3 &&
@@ -540,7 +555,7 @@ export function createChatServer(
             m.boot !== boot ||
             !UUID.test(m.id) ||
             m.from !== from ||
-            !validScope(m.scope, from) ||
+            !validScope(m.scope, from, 'text') ||
             ![
                 'chat',
                 'signal',
@@ -572,13 +587,10 @@ export function createChatServer(
             !ids.includes(from)
         )
             return false;
-        if (
-            m.scope !== 'room' &&
-            ids.some((id) => !m.scope.split(':').slice(1).includes(id))
-        )
+        const dm = m.scope.startsWith('dm:');
+        if (dm && ids.some((id) => !m.scope.split(':').slice(1).includes(id)))
             return false;
-        if (m.type === 'signal' && (m.scope === 'room' || ids.length !== 2))
-            return false;
+        if (m.type === 'signal' && (!dm || ids.length !== 2)) return false;
         if (m.type === 'profile' && m.scope !== 'room') return false;
         if (!['chat', 'edit'].includes(m.type) && m.data.length > 100_000)
             return false;
@@ -604,8 +616,7 @@ export function createChatServer(
                     : m.revision !== undefined
             )
                 return false;
-            if (m.type === 'share' && (m.scope !== 'room' || ids.length !== 2))
-                return false;
+            if (m.type === 'share' && (dm || ids.length !== 2)) return false;
         } else if (m.targets !== undefined || m.revision !== undefined)
             return false;
         if (
@@ -742,7 +753,12 @@ export function createChatServer(
                 profile: existing?.profile ?? null,
                 changes: existing?.changes ?? { start: 0, count: 0 },
             });
-            send(ws, { type: 'ready', boot, peers: peers(packet.id) });
+            send(ws, {
+                type: 'ready',
+                boot,
+                peers: peers(packet.id),
+                channels: [...channels.values()],
+            });
             for (const cleared of clears.values()) {
                 if (validScope(cleared.scope, packet.id)) send(ws, cleared);
             }
@@ -782,9 +798,31 @@ export function createChatServer(
                 !UUID.test(packet.id) ||
                 !validScope(packet.scope, member.id) ||
                 !Number.isSafeInteger(packet.time) ||
-                !encoded(packet.sig, 86)
+                !encoded(packet.sig, 86) ||
+                (packet.remove !== undefined &&
+                    (packet.remove !== true || packet.scope === 'room'))
             )
                 return ws.close(1008, 'Invalid conversation.');
+            // Deleting a channel clears it first, with the same signature,
+            // so nobody's copy of its messages goes without proof.
+            if (packet.remove && !channels.has(packet.scope))
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'That channel was already deleted.',
+                });
+            if (
+                packet.remove &&
+                [...members.values()].some(
+                    (person) => person.ws && person.call === packet.scope
+                )
+            )
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message:
+                        'Someone is in this voice channel. Try again when it is empty.',
+                });
             // A retried clear must not delete messages sent after the first one.
             if (operations.has(packet.id))
                 return send(ws, { type: 'ack', id: packet.id });
@@ -814,9 +852,18 @@ export function createChatServer(
                 if (person.ws && validScope(packet.scope, person.id))
                     send(person.ws, cleared);
             }
+            if (packet.remove) {
+                channels.delete(packet.scope);
+                clears.delete(packet.scope);
+                broadcastChannels();
+            }
             return send(ws, { type: 'ack', id: packet.id });
         }
-        if (packet.type === 'status' || packet.type === 'rename') {
+        if (
+            packet.type === 'status' ||
+            packet.type === 'rename' ||
+            packet.type === 'channel'
+        ) {
             // Status changes and renames reach everyone, so they are rate limited.
             const now = Date.now();
             if (now - member.changes.start > 60_000)
@@ -831,6 +878,42 @@ export function createChatServer(
             member.status = packet.status;
             broadcastPeers();
             return;
+        }
+        if (packet.type === 'channel') {
+            if (
+                typeof packet.id !== 'string' ||
+                !UUID.test(packet.id) ||
+                (packet.kind !== 'text' && packet.kind !== 'voice') ||
+                typeof packet.name !== 'string' ||
+                packet.name.length > 64 ||
+                !validName(normalizeName(packet.name))
+            )
+                return ws.close(1008, 'Invalid channel.');
+            const name = normalizeName(packet.name);
+            const kind = packet.kind;
+            if (
+                nameKey(name) === (kind === 'text' ? 'general' : 'voice') ||
+                [...channels.values()].some(
+                    (channel) =>
+                        channel.kind === kind &&
+                        nameKey(channel.name) === nameKey(name)
+                )
+            )
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'A channel with that name already exists.',
+                });
+            if (channels.size >= MAX_CHANNELS)
+                return send(ws, {
+                    type: 'error',
+                    id: packet.id,
+                    message: 'Channel limit reached. Delete one first.',
+                });
+            const scope = `ch:${randomUUID()}`;
+            channels.set(scope, { scope, kind, name });
+            broadcastChannels();
+            return send(ws, { type: 'ack', id: packet.id });
         }
         if (packet.type === 'rename') {
             if (
@@ -947,7 +1030,17 @@ export function createChatServer(
             return;
         }
         if (packet.type === 'call') {
-            if (packet.scope !== null && !validScope(packet.scope, member.id))
+            // A voice channel deleted a moment ago is not an attack.
+            if (
+                typeof packet.scope === 'string' &&
+                channelScope(packet.scope) &&
+                !validScope(packet.scope, member.id, 'voice')
+            )
+                return;
+            if (
+                packet.scope !== null &&
+                !validScope(packet.scope, member.id, 'voice')
+            )
                 return ws.close(1008, 'Invalid call.');
             if (packet.scope)
                 calls.join(packet.scope, member.id, (p) => send(ws, p));
@@ -1170,11 +1263,11 @@ export function createChatServer(
             if (
                 !record ||
                 record.upload ||
-                record.envelope.scope !== 'room' ||
+                record.envelope.scope !== m.scope ||
                 !record.audience.has(member.id)
             )
                 return fail(
-                    'Only participants who received a room message can share it. DMs stay private.'
+                    'Only participants who received a channel message can share it. DMs stay private.'
                 );
             if (record.envelope.id !== m.revision)
                 return fail(
@@ -1499,6 +1592,7 @@ export function createChatServer(
             operations.clear();
             clears.clear();
             nameOwners.clear();
+            channels.clear();
             historyBytes = 0;
             sessions.clear();
             members.clear();

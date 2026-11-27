@@ -30,9 +30,10 @@ export async function checkMobileLayout(page: Page, peer: Page, touch = false) {
 
     for (const width of [320, 390, 430, 720]) {
         await page.setViewportSize({ width, height: 844 });
+        // Navigation and conversation actions; channels call from voice rows.
         await expect(
             page.locator('.conversation-header button:visible')
-        ).toHaveCount(3);
+        ).toHaveCount(2);
         const header = await page.locator('.conversation-header').boundingBox();
         const input = await page.locator('.composer').boundingBox();
         assert.ok(

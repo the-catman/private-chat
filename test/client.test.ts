@@ -969,3 +969,73 @@ test('profiles keep the newest signed version and reach newcomers; renames, do n
         [alice.id, bob.id]
     );
 });
+
+test('channel messages are accepted, a deleted channel closes, and a signed clear empties it', async () => {
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const { client } = clientFor(alice, [alice, bob], boot);
+    const scope = `ch:${crypto.randomUUID()}`;
+    await client.receive({
+        type: 'channels',
+        channels: [{ scope, kind: 'text', name: 'plans' }],
+    });
+    client.select(scope);
+    const note = await seal(bob, [alice, bob], boot, scope, 'chat', {
+        kind: 'text',
+        text: 'Saturday?',
+    });
+    await client.receive({ type: 'message', envelope: note, received: 1 });
+    assert.equal(client.state.messages[0]?.scope, scope);
+    // Only channels everyone shares, or this browser's own DMs, are accepted.
+    const odd = await seal(bob, [alice, bob], boot, 'ch:plans', 'chat', {
+        kind: 'text',
+        text: 'Not a channel',
+    });
+    await assert.rejects(
+        client.receive({ type: 'message', envelope: odd, received: 2 }),
+        /another conversation/
+    );
+    // Channel history is shared with its own scope.
+    const missed = await seal(alice, [alice], boot, scope, 'chat', {
+        kind: 'text',
+        text: 'Sent while Bob was away',
+    });
+    await client.receive({ type: 'message', envelope: missed, received: 3 });
+    const sent = clientFor(alice, [alice, bob], boot);
+    await sent.client.receive({
+        type: 'channels',
+        channels: [{ scope, kind: 'text', name: 'plans' }],
+    });
+    await sent.client.receive({
+        type: 'message',
+        envelope: missed,
+        received: 3,
+    });
+    await sent.client.shareHistory([missed.id], bob.id, () => {});
+    const grant = sent.sent[0];
+    assert.equal(grant.scope, scope);
+    const b = clientFor(bob, [alice, bob], boot);
+    await b.client.receive({
+        type: 'channels',
+        channels: [{ scope, kind: 'text', name: 'plans' }],
+    });
+    await b.client.receive({
+        type: 'message',
+        envelope: grant,
+        source: { envelope: missed, received: 3 },
+        grants: [grant],
+        received: 3,
+    });
+    assert.deepEqual(b.client.state.messages[0]?.payload, {
+        kind: 'text',
+        text: 'Sent while Bob was away',
+    });
+    await client.receive(await clearedBy(bob, boot, scope));
+    assert.equal(client.state.messages.length, 0);
+    await client.receive({ type: 'channels', channels: [] });
+    assert.equal(client.state.scope, 'room');
+    assert.deepEqual(client.state.channels, []);
+});

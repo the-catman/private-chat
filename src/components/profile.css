@@ -259,3 +259,159 @@
 .profile-dialog .dialog-actions {
     margin-top: 20px;
 }
+
+/* Channels anyone can create and delete. */
+.channels-caption {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.channels-caption .icon-button,
+.channel-delete {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+}
+.channels-caption .icon-button svg,
+.channel-delete svg {
+    width: 15px;
+    height: 15px;
+}
+.channel-item {
+    position: relative;
+}
+.channel-item:has(.channel-delete) .channel-row {
+    padding-right: 40px;
+}
+.channel-row > span:not(.voice-count) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.channel-delete {
+    position: absolute;
+    top: 7px;
+    right: 6px;
+    opacity: 0;
+}
+.channel-item:hover .channel-delete,
+.channel-delete:focus-visible {
+    opacity: 1;
+}
+@media (hover: none) {
+    .channel-delete {
+        opacity: 1;
+    }
+}
+.channel-dialog .modal-content {
+    display: block;
+}
+.channel-dialog h2 {
+    margin-top: 0;
+}
+.channel-kind {
+    display: flex;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+.channel-kind legend {
+    margin-bottom: 6px;
+    font-size: 0.875rem;
+    font-weight: 550;
+}
+.channel-kind label {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.875rem;
+}
+.channel-kind label:has(:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+.channel-kind input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+.channel-kind label:has(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.channel-dialog label[for] {
+    display: block;
+    margin: 16px 0 6px;
+    font-size: 0.875rem;
+    font-weight: 550;
+}
+.channel-dialog input#channel-name {
+    width: 100%;
+    padding: 10px 12px;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 1rem;
+}
+.channel-dialog input#channel-name:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+    outline: none;
+}
+.channel-dialog .small-text {
+    margin: 12px 0 0;
+}
+
+/* Someone here cannot read part of this channel. */
+.share-prompt {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: calc(100% - 48px);
+    max-width: 960px;
+    align-self: center;
+    margin-bottom: 6px;
+    padding: 6px 6px 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+.share-prompt > svg {
+    flex-shrink: 0;
+    color: var(--accent);
+}
+.share-prompt > span {
+    flex: 1;
+    min-width: 0;
+}
+.share-prompt strong {
+    color: var(--text);
+}
+.share-prompt .small-primary {
+    padding: 6px 12px;
+    border-radius: 7px;
+    color: var(--on-accent);
+    background: var(--accent-solid);
+    font-size: 0.8125rem;
+}
+.share-prompt .icon-button {
+    width: 28px;
+    height: 28px;
+}
+@media (max-width: 840px) {
+    .share-prompt {
+        width: calc(100% - 24px);
+    }
+}

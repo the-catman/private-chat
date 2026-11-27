@@ -32,6 +32,7 @@ import { observeSpeaking, checkSpeaking } from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
 import { checkMessageFeatures } from './message-feature-checks';
 import { checkProfiles } from './profile-checks';
+import { checkChannels } from './channel-checks';
 import { checkMobileLayout } from './mobile-checks';
 import { checkUiChanges, checkPanelGestures } from './ui-checks';
 import {
@@ -281,21 +282,21 @@ async function checkCalls(alice: Person, bob: Person, charlie: Person) {
     await bob.page.evaluate(() => {
         window.__testSyntheticMic = true;
     });
-    await alice.page
-        .getByRole('button', { name: 'Start video call', exact: true })
-        .click();
+    // Channel calls start from the voice channel.
+    const voice = (page: Page) =>
+        page.locator('.voice-channel').filter({ hasText: /^voice/ });
+    await voice(alice.page).click();
     await expect(
         alice.page.getByRole('region', { name: 'Active call' })
     ).toBeVisible();
-    await bob.page
-        .getByRole('button', { name: 'Start voice call', exact: true })
+    await alice.page
+        .getByRole('button', { name: 'Turn camera on', exact: true })
         .click();
+    await voice(bob.page).click();
     await expect(
         bob.page.getByRole('region', { name: 'Active call' })
     ).toBeVisible();
-    await charlie.page
-        .getByRole('button', { name: 'Start voice call', exact: true })
-        .click();
+    await voice(charlie.page).click();
     for (const p of [alice, bob, charlie]) {
         await expectConnected(p.page, 3);
         await expect
@@ -433,6 +434,7 @@ async function run() {
         await checkMessageLayout(alice.page, bob.page);
         await checkMessageFeatures(alice.page, bob.page);
         await checkProfiles(alice.page, bob.page);
+        await checkChannels(alice, bob);
         assert.deepEqual(errors, []);
         return;
     }
@@ -472,8 +474,8 @@ async function run() {
             await writeFile(
                 mainPath,
                 (await readFile(mainPath, 'utf8')).replace(
-                    'section-caption">Channels<',
-                    'section-caption">Frontend refresh test<'
+                    'channels-caption">\n                        Channels\n',
+                    'channels-caption">\n                        Frontend refresh test\n'
                 )
             );
             await expect(
@@ -1236,6 +1238,7 @@ async function run() {
     await checkMessageLayout(alice.page, bob.page);
     await checkMessageFeatures(alice.page, bob.page);
     await checkProfiles(alice.page, bob.page);
+    await checkChannels(alice, bob);
 
     await checkUiChanges(alice.page, bob.page);
     await checkMobileLayout(alice.page, bob.page);

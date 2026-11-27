@@ -30,7 +30,14 @@ import type {
     MlsClientPacket,
     MlsServerPacket,
 } from '../types';
-import { b64, identityId, sign, unb64, verify } from './crypto.ts';
+import {
+    b64,
+    channelScope,
+    identityId,
+    sign,
+    unb64,
+    verify,
+} from './crypto.ts';
 
 // DAVE for Hush: the server is only the MLS delivery service. Every leaf's
 // signature key is signed by its Hush identity for this call, so the server
@@ -202,7 +209,8 @@ export class DaveSession {
         const { scope, boot } = this.options;
         if (
             !owner ||
-            (scope !== 'room' && !scope.split(':').slice(1).includes(owner.id))
+            (!channelScope(scope) &&
+                !scope.split(':').slice(1).includes(owner.id))
         )
             return false;
         const bundle = this.options.bundle(owner.id);

@@ -50,7 +50,11 @@ export function CallPanel({
     const popout = useRef<Popout | null>(null);
     const drag = useRef<{ y: number; height: number } | null>(null);
     const visibleHeight = Math.max(bounds.min, Math.min(bounds.max, height));
-    const title = call.scope === 'room' ? 'voice' : 'Private call';
+    const title =
+        call.scope === 'room'
+            ? 'voice'
+            : state.channels.find((c) => c.scope === call.scope)?.name ||
+              'Private call';
     const captureDevices = () =>
         panel.current?.ownerDocument.defaultView?.navigator.mediaDevices;
 

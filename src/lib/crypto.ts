@@ -146,6 +146,13 @@ export const clearText = (
 ) => JSON.stringify(['hush-clear-v1', boot, id, scope, time, by]);
 export const dmScope = (a: string, b: string) =>
     `dm:${[a, b].sort().join(':')}`;
+// A channel everyone in the room shares: 'room' is #general and the first
+// voice channel, and each channel someone creates gets its own ID.
+export const channelScope = (scope: string) =>
+    scope === 'room' ||
+    /^ch:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        scope
+    );
 export const aadText = (m: Envelope) =>
     JSON.stringify([
         m.v,
@@ -445,8 +452,8 @@ export async function grantRecipient(
         grant.v !== VERSION ||
         grant.boot !== source.boot ||
         grant.type !== 'share' ||
-        source.scope !== 'room' ||
-        grant.scope !== 'room' ||
+        !channelScope(source.scope) ||
+        grant.scope !== source.scope ||
         !['chat', 'edit'].includes(source.type) ||
         grant.targets?.length !== 1 ||
         grant.targets[0] !== messageId(source) ||

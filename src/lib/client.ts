@@ -12,6 +12,7 @@ import type {
     MediaState,
     PrekeyBundle,
     Status,
+    Channel,
 } from '../types';
 import type { SoundCue } from './sounds';
 import {
@@ -23,6 +24,7 @@ import {
     proofText,
     clearText,
     dmScope,
+    channelScope,
     contentKey,
     openWithKey,
     grantRecipient,
@@ -68,11 +70,11 @@ import {
     claimStorage,
 } from './signal.ts';
 
-// Whether this person belongs to the room or to this DM.
+// Whether this person belongs to a channel, which everyone does, or a DM.
 const inScope = (scope: string, id: string) => {
     const ids = scope.split(':');
     return (
-        scope === 'room' ||
+        channelScope(scope) ||
         (ids.length === 3 && ids[0] === 'dm' && ids.slice(1).includes(id))
     );
 };
@@ -117,6 +119,7 @@ const initial = (): ChatState => ({
     reactions: {},
     pins: {},
     profiles: {},
+    channels: [],
     status: storedStatus(),
     idle: false,
     config: null,
@@ -608,6 +611,7 @@ export class ChatClient {
             this.update({
                 phase: 'online',
                 peers: packet.peers,
+                ...this.withChannels(packet.channels),
                 messages: this.state.messages.filter((m) =>
                     this.pending.has(m.id)
                 ),
@@ -631,7 +635,7 @@ export class ChatClient {
             });
             if (
                 packet.event.userId !== this.state.self &&
-                this.state.scope !== 'room' &&
+                !channelScope(this.state.scope) &&
                 !renamed
             )
                 this.notify(
@@ -718,8 +722,11 @@ export class ChatClient {
                         ? 'You'
                         : this.state.peers.find((p) => p.id === packet.by)
                               ?.name || 'A member';
+                const channel = this.state.channels.find(
+                    (c) => c.scope === packet.scope
+                );
                 this.notify(
-                    `${name} cleared ${packet.scope === 'room' ? 'the room' : 'your direct messages'} for everyone.`
+                    `${name} cleared ${packet.scope === 'room' ? '#general' : channel ? `#${channel.name}` : 'your direct messages'} for everyone.`
                 );
             }
             return;
@@ -783,6 +790,10 @@ export class ChatClient {
             });
             this.rtc?.sync(packet.peers);
             if (this.liveHistory) void this.shareProfile();
+            return;
+        }
+        if (packet.type === 'channels') {
+            this.update(this.withChannels(packet.channels));
             return;
         }
         if (packet.type === 'history-end') {
@@ -852,10 +863,10 @@ export class ChatClient {
         const sender = this.state.peers.find((p) => p.id === m.from);
         if (!sender) throw new Error('Unknown sender.');
         // The relay chooses who receives what. Another person's message can
-        // only belong to the room or to the DM between them and this browser.
+        // only belong to a channel or to the DM between them and this browser.
         if (
             m.from !== this.identity.id &&
-            m.scope !== 'room' &&
+            !channelScope(m.scope) &&
             m.scope !== dmScope(this.identity.id, m.from)
         )
             throw new Error('Message sent to another conversation.');
@@ -1007,8 +1018,8 @@ export class ChatClient {
         if (m.type === 'share') {
             if (!packet.source) throw new Error('Missing original message.');
             envelope = packet.source.envelope;
-            if (envelope.scope !== 'room')
-                throw new Error('Only room history can be shared.');
+            if (!channelScope(envelope.scope))
+                throw new Error('Only channel history can be shared.');
         }
         const audience = new Set(Object.keys(envelope.keys));
         // Each signed grant extends a chain rooted in the original recipients.
@@ -1305,7 +1316,7 @@ export class ChatClient {
         this.pending.set(envelope.id, envelope);
         return this.confirmed({ type: 'envelope', envelope }, envelope.id);
     }
-    async clearConversation(scope: string) {
+    async clearConversation(scope: string, remove = false) {
         if (this.state.phase !== 'online')
             throw new Error('Wait until you are connected.');
         const id = crypto.randomUUID();
@@ -1320,7 +1331,17 @@ export class ChatClient {
                 this.identity.id
             )
         );
-        await this.confirmed({ type: 'clear', id, scope, time, sig }, id);
+        await this.confirmed(
+            {
+                type: 'clear',
+                id,
+                scope,
+                time,
+                sig,
+                ...(remove && { remove }),
+            },
+            id
+        );
     }
     private confirmed(packet: ClientPacket, id: string) {
         return new Promise<void>((resolve, reject) => {
@@ -1499,7 +1520,7 @@ export class ChatClient {
             const message = this.state.messages.find((m) => m.id === id);
             if (
                 !message ||
-                message.scope !== 'room' ||
+                !channelScope(message.scope) ||
                 (!message.envelope.keys[this.identity.id] &&
                     !message.historyGrant) ||
                 message.status !== 'sent'
@@ -1536,7 +1557,7 @@ export class ChatClient {
                         this.identity,
                         [this.identity, recipient],
                         this.state.config!.boot,
-                        'room',
+                        message.scope,
                         'share',
                         { kind: 'history', key: b64(raw) },
                         { targets: [id], revision: message.envelope.id }
@@ -1556,13 +1577,14 @@ export class ChatClient {
         if (this.state.phase !== 'online')
             throw new Error('Wait until you are connected.');
         const self = { id: this.identity.id, bundle: this.identity.bundle };
+        const shared = channelScope(scope);
         const others = this.state.peers.filter(
             (p) =>
-                (p.online || (offline && scope !== 'room')) &&
+                (p.online || (offline && !shared)) &&
                 p.id !== self.id &&
-                (scope === 'room' || dmScope(self.id, p.id) === scope)
+                (shared || dmScope(self.id, p.id) === scope)
         );
-        if (scope !== 'room' && others.length !== 1)
+        if (!shared && others.length !== 1)
             throw new Error(
                 'This person is offline. You can message them when they return.'
             );
@@ -1683,6 +1705,8 @@ export class ChatClient {
         video: boolean,
         initial?: Pick<MediaState, 'muted' | 'deafened'>
     ) {
+        if (channelScope(scope) && !this.voiceChannel(scope))
+            throw new Error('That voice channel was deleted.');
         this.recipients(scope);
         if (!this.rtc) return;
         if (this.rtc.scope) this.leaveCall();
@@ -1718,7 +1742,8 @@ export class ChatClient {
         if (!call || this.joiningCall || this.rtc?.scope) return;
         if (
             call.boot !== this.state.config?.boot ||
-            (call.scope !== 'room' &&
+            (channelScope(call.scope) && !this.voiceChannel(call.scope)) ||
+            (!channelScope(call.scope) &&
                 !this.state.peers.some(
                     (p) =>
                         p.id !== this.state.self &&
@@ -1878,6 +1903,46 @@ export class ChatClient {
         });
         this.profiles = run.catch(() => {});
         return edited ? run : this.profiles;
+    }
+    private voiceChannel(scope: string) {
+        return (
+            scope === 'room' ||
+            this.state.channels.some(
+                (c) => c.scope === scope && c.kind === 'voice'
+            )
+        );
+    }
+    // Leaves a deleted channel, if it was open.
+    private withChannels(channels: Channel[]) {
+        const open = (scope: string) =>
+            !channelScope(scope) ||
+            scope === 'room' ||
+            channels.some((c) => c.scope === scope && c.kind === 'text');
+        const unread = Object.fromEntries(
+            Object.entries(this.state.unread).filter(([scope]) => open(scope))
+        );
+        return {
+            channels,
+            unread,
+            ...(!open(this.state.scope) && { scope: 'room' }),
+        };
+    }
+    // Resolves with the new channel's scope.
+    async createChannel(kind: Channel['kind'], name: string) {
+        const next = normalizeName(name);
+        if (!validName(next))
+            throw new Error('Choose a name of 1–32 characters.');
+        if (this.state.phase !== 'online')
+            throw new Error('Wait until you are connected.');
+        const id = crypto.randomUUID();
+        await this.confirmed({ type: 'channel', id, kind, name: next }, id);
+        return [...this.state.channels]
+            .reverse()
+            .find((c) => c.kind === kind && c.name === next)?.scope;
+    }
+    // Deleting a channel clears it with a signed request, like clearing.
+    async deleteChannel(scope: string) {
+        await this.clearConversation(scope, true);
     }
     async logout() {
         this.stopped = true;

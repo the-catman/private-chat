@@ -106,6 +106,9 @@ export type Pin = {
     envelope: string;
 };
 // Status text and an avatar, end-to-end encrypted to everyone in the room.
+// A channel someone created. #general and the first voice channel share the
+// scope 'room' and always exist.
+export type Channel = { scope: string; kind: 'text' | 'voice'; name: string };
 export type Profile = {
     text: string;
     // A data: URL of the small, already resized avatar image.
@@ -247,6 +250,7 @@ export type ChatState = {
     reactions: Record<string, Record<string, Reaction>>;
     pins: Record<string, Pin>;
     profiles: Record<string, Profile>;
+    channels: Channel[];
     // The status this person chose; idle is added automatically.
     status: Exclude<Status, 'idle'>;
     idle: boolean;
@@ -255,8 +259,9 @@ export type ChatState = {
 };
 export type ServerPacket =
     | { type: 'challenge'; boot: string; nonce: string }
-    | { type: 'ready'; boot: string; peers: Peer[] }
+    | { type: 'ready'; boot: string; peers: Peer[]; channels: Channel[] }
     | { type: 'peers'; peers: Peer[] }
+    | { type: 'channels'; channels: Channel[] }
     | { type: 'presence'; event: Presence }
     | {
           type: 'cleared';
@@ -299,7 +304,16 @@ export type ClientPacket =
     | ({ type: 'prekeys' } & Prekeys)
     | { type: 'call'; scope: string | null }
     // Signed by the person clearing, so nobody else can wipe a conversation.
-    | { type: 'clear'; id: string; scope: string; time: number; sig: string }
+    | {
+          type: 'clear';
+          id: string;
+          scope: string;
+          time: number;
+          sig: string;
+          // Also delete the channel itself.
+          remove?: boolean;
+      }
+    | { type: 'channel'; id: string; kind: Channel['kind']; name: string }
     | { type: 'fetch'; id: string }
     | ({ type: 'media'; request: number } & MediaRequest)
     | MlsClientPacket

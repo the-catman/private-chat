@@ -10,7 +10,7 @@ export const partCount = (size: number) =>
 // Larger files download only when someone opens them.
 export const AUTO_FETCH_BYTES = 8 * 1024 * 1024;
 // Bump when client and relay must be restarted together.
-export const PROTOCOL = 7;
+export const PROTOCOL = 8;
 export const MAX_ENCRYPTED_LENGTH = 2_800_000;
 export const MAX_BATCH = 100;
 export const normalizeName = (name: string) =>

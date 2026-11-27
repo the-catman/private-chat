@@ -500,7 +500,8 @@ export async function checkCaptureCleanup(page: Page) {
 export async function checkFourPersonCall(pages: Page[]) {
     for (const page of pages) {
         await page
-            .getByRole('button', { name: 'Start voice call', exact: true })
+            .locator('.voice-channel')
+            .filter({ hasText: /^voice/ })
             .click();
         await expect(
             page.getByRole('region', { name: 'Active call' })

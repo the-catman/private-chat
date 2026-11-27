@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type React from 'react';
 import type { ChatClient } from '../lib/client';
 import { Icon } from '../Icon';
 import { MessageMenu, type MenuAction } from './MessageActions';
@@ -77,25 +78,38 @@ export function ConversationActions({
                 />
             )}
             {clear && (
-                <ClearConversationDialog
-                    title={clear.title}
+                <ConfirmDialog
+                    heading="Clear chat for everyone?"
+                    action="Clear for everyone"
+                    busyAction="Clearing…"
                     close={() => {
                         setClear(null);
                         trigger.current?.focus({ preventScroll: true });
                     }}
                     confirm={() => client.clearConversation(clear.scope)}
-                />
+                >
+                    Delete all messages, files and voice notes in{' '}
+                    <strong>{clear.title}</strong> for everyone. This can’t be
+                    undone.
+                </ConfirmDialog>
             )}
         </>
     );
 }
 
-function ClearConversationDialog({
-    title,
+// A destructive action that waits for an explicit confirmation.
+export function ConfirmDialog({
+    heading,
+    children,
+    action,
+    busyAction,
     close,
     confirm,
 }: {
-    title: string;
+    heading: string;
+    children: React.ReactNode;
+    action: string;
+    busyAction: string;
     close: () => void;
     confirm: () => Promise<void>;
 }) {
@@ -106,7 +120,7 @@ function ClearConversationDialog({
     useEffect(() => {
         dialog.current?.showModal();
     }, []);
-    const clear = async () => {
+    const run = async () => {
         if (busy) return;
         setBusy(true);
         try {
@@ -116,7 +130,7 @@ function ClearConversationDialog({
             setError(
                 error instanceof Error
                     ? error.message
-                    : 'Could not clear this chat.'
+                    : 'Something went wrong. Please try again.'
             );
             setBusy(false);
         }
@@ -125,8 +139,8 @@ function ClearConversationDialog({
         <dialog
             ref={dialog}
             className="modal clear-chat-dialog"
-            aria-labelledby="clear-chat-title"
-            aria-describedby="clear-chat-description"
+            aria-labelledby="confirm-title"
+            aria-describedby="confirm-description"
             aria-busy={busy}
             onCancel={(event) => {
                 event.preventDefault();
@@ -138,11 +152,8 @@ function ClearConversationDialog({
         >
             <SheetHandle />
             <div className="modal-content">
-                <h2 id="clear-chat-title">Clear chat for everyone?</h2>
-                <p id="clear-chat-description">
-                    Delete all messages, files and voice notes in{' '}
-                    <strong>{title}</strong> for everyone. This can’t be undone.
-                </p>
+                <h2 id="confirm-title">{heading}</h2>
+                <p id="confirm-description">{children}</p>
                 {error && (
                     <p className="form-error" role="alert">
                         {error}
@@ -160,9 +171,9 @@ function ClearConversationDialog({
                     <button
                         className="destructive-button"
                         disabled={busy}
-                        onClick={() => void clear()}
+                        onClick={() => void run()}
                     >
-                        {busy ? 'Clearing…' : 'Clear for everyone'}
+                        {busy ? busyAction : action}
                     </button>
                 </div>
             </div>

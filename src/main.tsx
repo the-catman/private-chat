@@ -8,9 +8,23 @@ import React, {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ChatClient } from './lib/client';
-import { b64, unb64, dmScope, safetyCode, partHashes } from './lib/crypto';
+import {
+    b64,
+    unb64,
+    channelScope,
+    dmScope,
+    safetyCode,
+    partHashes,
+} from './lib/crypto';
 import { Icon } from './Icon';
-import type { Peer, ChatState, Content, Message, Reaction } from './types';
+import type {
+    Channel,
+    Peer,
+    ChatState,
+    Content,
+    Message,
+    Reaction,
+} from './types';
 import {
     Avatar,
     IconButton,
@@ -26,6 +40,7 @@ import {
     type Verification,
 } from './components/Profile';
 import { storedProfile } from './lib/profile';
+import { ChannelDialog } from './components/Channels';
 import { CallPanel } from './components/CallPanel';
 import { AppearanceControls } from './components/Appearance';
 import { EmojiPicker } from './components/EmojiPicker';
@@ -46,7 +61,10 @@ import {
 import { ShortcutHelp } from './components/ShortcutHelp';
 import { FileAttachment } from './components/FileAttachment';
 import { ParticipantVolume } from './components/ParticipantVolume';
-import { ConversationActions } from './components/ConversationActions';
+import {
+    ConfirmDialog,
+    ConversationActions,
+} from './components/ConversationActions';
 import { useChatViewport, useMobileLayout } from './components/useMobileLayout';
 import { useMobilePanel } from './components/useMobilePanel';
 import { SheetHandle } from './components/SheetHandle';
@@ -690,7 +708,10 @@ function Composer({
     };
     // DMs to someone offline wait on the server until they return.
     const offline =
-        state.phase !== 'online' || (state.scope !== 'room' && !recipient);
+        state.phase !== 'online' || (!channelScope(state.scope) && !recipient);
+    const where = recipient
+        ? recipient.name
+        : `#${state.channels.find((c) => c.scope === state.scope)?.name ?? 'general'}`;
     useEffect(() => {
         if (!suggestions && !mention) return;
         const dismiss = (event: PointerEvent) => {
@@ -1038,11 +1059,7 @@ function Composer({
                                             }
                                           : undefined
                                 }
-                                label={
-                                    recipient
-                                        ? `Message ${recipient.name}`
-                                        : 'Message #general'
-                                }
+                                label={`Message ${where}`}
                                 placeholder={
                                     offline
                                         ? mobile
@@ -1058,9 +1075,7 @@ function Composer({
                                                 : 'Your voice note is ready to send'
                                             : mobile
                                               ? 'Message…'
-                                              : recipient
-                                                ? `Message ${recipient.name}`
-                                                : 'Message #general'
+                                              : `Message ${where}`
                                 }
                                 value={text}
                                 onChange={(value, cursor) => {
@@ -1595,6 +1610,17 @@ function App() {
         anchor: HTMLElement;
     } | null>(null);
     const [profileOpen, setProfileOpen] = useState(false);
+    const [channelOpen, setChannelOpen] = useState(false);
+    // Offers to share history with someone who lacks it, once per gap.
+    const [dismissedShares, setDismissedShares] = useState<string[]>([]);
+    const [sharing, setSharing] = useState<{
+        name: string;
+        done: number;
+        total: number;
+    } | null>(null);
+    const [deletingChannel, setDeletingChannel] = useState<Channel | null>(
+        null
+    );
     const [statusMenu, setStatusMenu] = useState<{
         x: number;
         y: number;
@@ -1604,7 +1630,7 @@ function App() {
     const mentionKey = state.peers
         .filter(
             (p) =>
-                state.scope === 'room' ||
+                channelScope(state.scope) ||
                 p.id === state.self ||
                 (state.self !== null &&
                     dmScope(state.self, p.id) === state.scope)
@@ -1808,14 +1834,73 @@ function App() {
     const statusLine = (peer: Peer) =>
         state.profiles[peer.id]?.text || statusLabels[shown(peer)];
     const visible = state.peers.filter((p) => shown(p) !== 'offline');
+    // People here who cannot read some of this channel: someone new, or
+    // someone who was away. Sharing stays a choice.
+    const missing =
+        channelScope(state.scope) && state.phase === 'online'
+            ? others
+                  .filter((p) => shown(p) !== 'offline')
+                  .map((peer) => {
+                      const ids = state.messages
+                          .filter(
+                              (m) =>
+                                  m.scope === state.scope &&
+                                  m.status === 'sent' &&
+                                  !m.audience.includes(peer.id)
+                          )
+                          .map((m) => m.id)
+                          .slice(-MAX_BATCH);
+                      return {
+                          peer,
+                          ids,
+                          key: `${state.scope}:${peer.id}:${ids[ids.length - 1]}`,
+                      };
+                  })
+                  .filter(
+                      (gap) =>
+                          gap.ids.length && !dismissedShares.includes(gap.key)
+                  )
+            : [];
+    const shareMissing = async (gap: (typeof missing)[number]) => {
+        setSharing({ name: gap.peer.name, done: 0, total: gap.ids.length });
+        try {
+            await client.shareHistory(gap.ids, gap.peer.id, (done) =>
+                setSharing({
+                    name: gap.peer.name,
+                    done,
+                    total: gap.ids.length,
+                })
+            );
+            client.notify(`Shared history with ${gap.peer.name}.`);
+        } catch (error) {
+            client.notify(
+                error instanceof Error
+                    ? error.message
+                    : 'Could not share history.'
+            );
+        } finally {
+            setSharing(null);
+        }
+    };
     const away = others.filter((p) => shown(p) === 'offline');
-    const recipient =
-        state.scope !== 'room'
-            ? state.peers.find(
-                  (p) => p.id !== self && dmScope(self, p.id) === state.scope
-              )
-            : undefined;
-    const title = recipient?.name || 'general';
+    const recipient = !channelScope(state.scope)
+        ? state.peers.find(
+              (p) => p.id !== self && dmScope(self, p.id) === state.scope
+          )
+        : undefined;
+    const textChannels: Channel[] = [
+        { scope: 'room', kind: 'text', name: 'general' },
+        ...state.channels.filter((c) => c.kind === 'text'),
+    ];
+    const voiceChannels: Channel[] = [
+        { scope: 'room', kind: 'voice', name: 'voice' },
+        ...state.channels.filter((c) => c.kind === 'voice'),
+    ];
+    const channelName = (scope: string, kind: Channel['kind'] = 'text') =>
+        (kind === 'text' ? textChannels : voiceChannels).find(
+            (c) => c.scope === scope
+        )?.name;
+    const title = recipient?.name || channelName(state.scope) || 'general';
     const conversationMessages = state.messages.filter(
         (m) => m.scope === state.scope
     );
@@ -1838,7 +1923,7 @@ function App() {
     const canShare =
         selectedMessages.length > 0 &&
         selectedMessages.every(
-            (m) => m.scope === 'room' && m.status === 'sent'
+            (m) => channelScope(m.scope) && m.status === 'sent'
         );
     const toggle = (id: string, range = false) => {
         const message = state.messages.find((m) => m.id === id);
@@ -2088,7 +2173,7 @@ function App() {
                   disabled: menuMessage.status !== 'sent',
                   run: () => toggle(menuMessage.id),
               },
-              ...(menuMessage.scope === 'room'
+              ...(channelScope(menuMessage.scope)
                   ? [
                         {
                             label: 'Share message',
@@ -2136,7 +2221,6 @@ function App() {
               }))
             : []),
     ].sort((a, b) => a.time - b.time);
-    const roomCall = online.filter((p) => p.call === 'room');
     const incoming = others.find(
         (p) =>
             p.online &&
@@ -2199,49 +2283,99 @@ function App() {
                     />
                 </div>
                 <div className="sidebar-content">
-                    <div className="section-caption">Channels</div>
-                    <button
-                        className={`channel-row ${state.scope === 'room' ? 'selected' : ''}`}
-                        onClick={() => select('room')}
-                    >
-                        <Icon name="hash" />
-                        <span>general</span>
-                        {Boolean(state.unread.room) && (
-                            <b className="unread-badge">{state.unread.room}</b>
-                        )}
-                    </button>
-                    <button
-                        className={`channel-row voice-channel ${state.call?.scope === 'room' ? 'in-voice' : ''}`}
-                        onClick={() => {
-                            select('room');
-                            if (state.call?.scope !== 'room')
-                                void client.joinCall('room');
-                        }}
-                        disabled={state.phase !== 'online'}
-                    >
-                        <Icon name="volume" />
-                        <span>voice</span>
-                        {roomCall.length > 0 && (
-                            <span className="voice-count">
-                                {roomCall.length}
-                            </span>
-                        )}
-                    </button>
-                    {roomCall.length > 0 && (
-                        <div className="lounge-people">
-                            {roomCall.map((p) => (
-                                <span key={p.id}>
-                                    <Avatar
-                                        name={p.name}
-                                        id={p.id}
-                                        image={avatarOf(p.id)}
-                                        size="tiny"
-                                    />
-                                    {p.name}
-                                </span>
-                            ))}
+                    <div className="section-caption channels-caption">
+                        Channels
+                        <IconButton
+                            icon="plus"
+                            label="Create channel"
+                            disabled={state.phase !== 'online'}
+                            onClick={() => setChannelOpen(true)}
+                        />
+                    </div>
+                    {textChannels.map((channel) => (
+                        <div className="channel-item" key={channel.scope}>
+                            <button
+                                className={`channel-row ${state.scope === channel.scope ? 'selected' : ''}`}
+                                onClick={() => select(channel.scope)}
+                            >
+                                <Icon name="hash" />
+                                <span>{channel.name}</span>
+                                {Boolean(state.unread[channel.scope]) && (
+                                    <b className="unread-badge">
+                                        {state.unread[channel.scope]}
+                                    </b>
+                                )}
+                            </button>
+                            {channel.scope !== 'room' && (
+                                <IconButton
+                                    icon="trash"
+                                    label={`Delete channel ${channel.name}`}
+                                    className="channel-delete"
+                                    disabled={state.phase !== 'online'}
+                                    onClick={() => setDeletingChannel(channel)}
+                                />
+                            )}
                         </div>
-                    )}
+                    ))}
+                    {voiceChannels.map((channel) => {
+                        const people = online.filter(
+                            (p) => p.call === channel.scope
+                        );
+                        return (
+                            <React.Fragment key={`voice-${channel.scope}`}>
+                                <div className="channel-item">
+                                    <button
+                                        className={`channel-row voice-channel ${state.call?.scope === channel.scope ? 'in-voice' : ''}`}
+                                        onClick={() => {
+                                            setMobileNav(false);
+                                            if (
+                                                state.call?.scope !==
+                                                channel.scope
+                                            )
+                                                void client.joinCall(
+                                                    channel.scope
+                                                );
+                                        }}
+                                        disabled={state.phase !== 'online'}
+                                    >
+                                        <Icon name="volume" />
+                                        <span>{channel.name}</span>
+                                        {people.length > 0 && (
+                                            <span className="voice-count">
+                                                {people.length}
+                                            </span>
+                                        )}
+                                    </button>
+                                    {channel.scope !== 'room' && (
+                                        <IconButton
+                                            icon="trash"
+                                            label={`Delete channel ${channel.name}`}
+                                            className="channel-delete"
+                                            disabled={state.phase !== 'online'}
+                                            onClick={() =>
+                                                setDeletingChannel(channel)
+                                            }
+                                        />
+                                    )}
+                                </div>
+                                {people.length > 0 && (
+                                    <div className="lounge-people">
+                                        {people.map((p) => (
+                                            <span key={p.id}>
+                                                <Avatar
+                                                    name={p.name}
+                                                    id={p.id}
+                                                    image={avatarOf(p.id)}
+                                                    size="tiny"
+                                                />
+                                                {p.name}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </React.Fragment>
+                        );
+                    })}
                     <div className="section-caption dm-caption">
                         Direct messages
                     </div>
@@ -2286,14 +2420,14 @@ function App() {
                         <div>
                             <strong>Voice connected</strong>
                             <small>
-                                {state.call.scope === 'room'
-                                    ? 'voice'
-                                    : state.peers.find(
-                                          (p) =>
-                                              p.id !== self &&
-                                              state.call!.scope ===
-                                                  dmScope(self, p.id)
-                                      )?.name || 'Private call'}
+                                {channelName(state.call.scope, 'voice') ||
+                                    state.peers.find(
+                                        (p) =>
+                                            p.id !== self &&
+                                            state.call!.scope ===
+                                                dmScope(self, p.id)
+                                    )?.name ||
+                                    'Private call'}
                             </small>
                         </div>
                         <IconButton
@@ -2361,33 +2495,38 @@ function App() {
                             )}
                     </div>
                     <div className="header-actions">
-                        <IconButton
-                            icon="phone"
-                            label="Start voice call"
-                            disabled={
-                                state.phase !== 'online' ||
-                                Boolean(
-                                    recipient && shown(recipient) === 'offline'
-                                )
-                            }
-                            onClick={() => void client.joinCall(state.scope)}
-                        />
+                        {/* Channels call from voice channels; DMs from here. */}
+                        {recipient && (
+                            <IconButton
+                                icon="phone"
+                                label="Start voice call"
+                                disabled={
+                                    state.phase !== 'online' ||
+                                    shown(recipient) === 'offline'
+                                }
+                                onClick={() =>
+                                    void client.joinCall(state.scope)
+                                }
+                            />
+                        )}
                         {!mobile && (
                             <>
-                                <IconButton
-                                    icon="video"
-                                    label="Start video call"
-                                    disabled={
-                                        state.phase !== 'online' ||
-                                        Boolean(
-                                            recipient &&
+                                {recipient && (
+                                    <IconButton
+                                        icon="video"
+                                        label="Start video call"
+                                        disabled={
+                                            state.phase !== 'online' ||
                                             shown(recipient) === 'offline'
-                                        )
-                                    }
-                                    onClick={() =>
-                                        void client.joinCall(state.scope, true)
-                                    }
-                                />
+                                        }
+                                        onClick={() =>
+                                            void client.joinCall(
+                                                state.scope,
+                                                true
+                                            )
+                                        }
+                                    />
+                                )}
                                 <IconButton
                                     icon="search"
                                     label="Search this conversation"
@@ -2438,22 +2577,24 @@ function App() {
                             actions={
                                 mobile
                                     ? [
-                                          {
-                                              label: 'Start video call',
-                                              icon: 'video',
-                                              disabled:
-                                                  state.phase !== 'online' ||
-                                                  Boolean(
-                                                      recipient &&
-                                                      shown(recipient) ===
-                                                          'offline'
-                                                  ),
-                                              run: () =>
-                                                  void client.joinCall(
-                                                      state.scope,
-                                                      true
-                                                  ),
-                                          },
+                                          ...(recipient
+                                              ? [
+                                                    {
+                                                        label: 'Start video call',
+                                                        icon: 'video',
+                                                        disabled:
+                                                            state.phase !==
+                                                                'online' ||
+                                                            shown(recipient) ===
+                                                                'offline',
+                                                        run: () =>
+                                                            void client.joinCall(
+                                                                state.scope,
+                                                                true
+                                                            ),
+                                                    },
+                                                ]
+                                              : []),
                                           {
                                               label: searchOpen
                                                   ? 'Close search'
@@ -2473,11 +2614,11 @@ function App() {
                                     : []
                             }
                             share={
-                                state.scope === 'room' && messages.length > 0
+                                channelScope(state.scope) && messages.length > 0
                                     ? () => {
                                           setSelectionMode(true);
                                           client.notify(
-                                              'Select room messages, then choose Share selected.'
+                                              'Select messages, then choose Share selected.'
                                           );
                                       }
                                     : undefined
@@ -2806,7 +2947,7 @@ function App() {
                         >
                             Select mine
                         </button>
-                        {state.scope === 'room' && (
+                        {channelScope(state.scope) && (
                             <button
                                 className="small-primary"
                                 disabled={!canShare || state.phase !== 'online'}
@@ -2848,6 +2989,47 @@ function App() {
                                 selectionAnchor.current = null;
                             }}
                         />
+                    </div>
+                )}
+                {(sharing || missing[0]) && (
+                    <div className="share-prompt" role="status">
+                        <Icon name="share" size={16} />
+                        {sharing ? (
+                            <span>
+                                Sharing with <strong>{sharing.name}</strong>…{' '}
+                                {sharing.done}/{sharing.total}
+                            </span>
+                        ) : (
+                            <>
+                                <span>
+                                    <strong>{missing[0]!.peer.name}</strong>{' '}
+                                    can’t see {missing[0]!.ids.length} earlier
+                                    message
+                                    {missing[0]!.ids.length === 1
+                                        ? ''
+                                        : 's'}{' '}
+                                    here.
+                                </span>
+                                <button
+                                    className="small-primary"
+                                    onClick={() =>
+                                        void shareMissing(missing[0]!)
+                                    }
+                                >
+                                    Share
+                                </button>
+                                <IconButton
+                                    icon="close"
+                                    label="Don’t share"
+                                    onClick={() =>
+                                        setDismissedShares((keys) => [
+                                            ...keys,
+                                            missing[0]!.key,
+                                        ])
+                                    }
+                                />
+                            </>
+                        )}
                     </div>
                 )}
                 <Composer
@@ -3029,6 +3211,28 @@ function App() {
                             profileCard.anchor.focus({ preventScroll: true });
                     }}
                 />
+            )}
+            {channelOpen && (
+                <ChannelDialog
+                    client={client}
+                    close={() => setChannelOpen(false)}
+                    created={(scope, kind) => {
+                        if (kind === 'text') select(scope);
+                    }}
+                />
+            )}
+            {deletingChannel && (
+                <ConfirmDialog
+                    heading={`Delete ${deletingChannel.kind === 'text' ? '#' : ''}${deletingChannel.name}?`}
+                    action="Delete channel"
+                    busyAction="Deleting…"
+                    close={() => setDeletingChannel(null)}
+                    confirm={() => client.deleteChannel(deletingChannel.scope)}
+                >
+                    {deletingChannel.kind === 'text'
+                        ? 'The channel and all its messages, files and voice notes are deleted for everyone. This can’t be undone.'
+                        : 'The voice channel is removed for everyone.'}
+                </ConfirmDialog>
             )}
             {profileOpen && (
                 <ProfileDialog
