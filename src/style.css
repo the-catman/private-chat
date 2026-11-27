@@ -1592,15 +1592,26 @@ kbd {
     display: inline-block;
     margin: 5px 10px 0 0;
 }
-.message-more {
+.message-actions {
     position: absolute;
-    right: 6px;
-    top: 6px;
-    opacity: 0;
+    right: 8px;
+    top: -14px;
+    z-index: 2;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
     background: var(--panel);
+    box-shadow: 0 2px 8px #0000001f;
+    opacity: 0;
 }
-.message:hover .message-more,
-.message:focus-within .message-more {
+.message-actions .icon-button {
+    width: 30px;
+    height: 30px;
+}
+.message:hover .message-actions,
+.message:focus-within .message-actions {
     opacity: 1;
 }
 .message-checkbox {
@@ -1625,10 +1636,6 @@ kbd {
 }
 .message.continued .message-text {
     margin-top: 0;
-}
-.message.continued .message-more {
-    top: 50%;
-    transform: translateY(-50%);
 }
 .message-gutter {
     width: 34px;
@@ -2180,8 +2187,15 @@ input:focus-visible {
     color: var(--danger);
 }
 @media (hover: none) {
-    .message-more {
+    .message-actions {
         opacity: 1;
+        top: 6px;
+        border: 0;
+        background: none;
+        box-shadow: none;
+    }
+    .message-actions .quick-action {
+        display: none;
     }
 }
 @media (max-width: 1250px) {
@@ -2416,4 +2430,239 @@ input:focus-visible {
     font: inherit;
     padding: 9px;
     max-width: 100%;
+}
+.message.mentioned {
+    background: color-mix(in srgb, #e0a045 10%, transparent);
+    box-shadow: inset 3px 0 0 #e0a045;
+}
+.message.mentioned:hover,
+.message.mentioned:focus-within {
+    background: color-mix(in srgb, #e0a045 15%, transparent);
+}
+.message.flash {
+    animation: message-flash 1.6s ease-out;
+}
+@keyframes message-flash {
+    from {
+        background: var(--accent-soft);
+        box-shadow: inset 3px 0 0 var(--accent);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .message.flash {
+        animation: none;
+        outline: 2px solid var(--accent);
+    }
+}
+.mention {
+    padding: 0 3px;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 550;
+}
+.mention.me {
+    background: color-mix(in srgb, #e0a045 22%, transparent);
+    color: inherit;
+}
+.reply-quote {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    margin: 0 0 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font-size: 0.8125rem;
+    text-align: left;
+    user-select: none;
+}
+.reply-quote strong {
+    flex-shrink: 0;
+    color: var(--name-color, var(--text));
+    font-weight: 600;
+}
+:root[data-theme='light'] .reply-quote strong {
+    color: color-mix(in srgb, var(--name-color, var(--text)), #1d1f24 55%);
+}
+.reply-quote span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+button.reply-quote:hover span {
+    color: var(--text);
+}
+.reply-quote.missing {
+    font-style: italic;
+}
+.reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+    user-select: none;
+}
+.reaction {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.reaction:hover:not(:disabled) {
+    border-color: var(--muted);
+}
+.reaction.mine {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+.reaction-emoji {
+    font-size: 1rem;
+    line-height: 1;
+}
+.reaction.add-reaction {
+    opacity: 0;
+}
+.message:hover .add-reaction,
+.message:focus-within .add-reaction {
+    opacity: 1;
+}
+@media (hover: none) {
+    .reaction.add-reaction {
+        opacity: 1;
+    }
+}
+.reaction-picker {
+    position: fixed;
+    z-index: 30;
+}
+.reaction-picker .emoji-picker {
+    position: static;
+    width: 100%;
+    max-height: min(400px, calc(100dvh - 24px));
+}
+.pinned-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.pinned-trigger {
+    position: relative;
+    display: inline-flex;
+}
+.pinned-count {
+    position: absolute;
+    right: 1px;
+    bottom: 3px;
+    min-width: 15px;
+    padding: 0 3px;
+    border-radius: 999px;
+    background: var(--accent-solid);
+    color: var(--on-accent);
+    font-size: 0.625rem;
+    line-height: 15px;
+    text-align: center;
+    pointer-events: none;
+}
+.pinned-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 20;
+    width: min(360px, calc(100vw - 24px));
+    max-height: min(420px, 70dvh);
+    overflow-y: auto;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+}
+.pinned-panel h3 {
+    margin: 0 0 8px;
+    font-size: 0.875rem;
+}
+.pinned-panel ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.pinned-panel li {
+    display: flex;
+    align-items: flex-start;
+    gap: 4px;
+}
+.pinned-item {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--text);
+    text-align: left;
+}
+.pinned-item:hover,
+.pinned-item:focus-visible {
+    background: var(--hover);
+}
+.pinned-item strong {
+    font-size: 0.8125rem;
+}
+.pinned-item span {
+    color: var(--muted);
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+}
+.pinned-panel p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+.reply-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 4px 4px 4px 12px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+.reply-bar > span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.reply-bar strong {
+    color: var(--text);
+}
+.reply-bar small {
+    margin-left: 8px;
+    font-size: inherit;
+}
+.reply-bar .icon-button {
+    width: 28px;
+    height: 28px;
+}
+.message-meta .pinned-note {
+    margin: 0;
 }

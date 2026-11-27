@@ -60,3 +60,32 @@ test('image links embed a few proxied images, outside code only', () => {
     );
     assert.equal(many.match(/<img/g)?.length, 4);
 });
+
+test('mentions match known names, longest first, outside code and links', async () => {
+    const { mentions, mentionQuery } = await import('../src/lib/mentions');
+    const html = renderToStaticMarkup(
+        createElement(MarkdownMessage, {
+            text: 'Hi @Ann Lee and @ann, not email@Ann or `@Ann` or [@Ann](https://example.com)',
+            names: ['Ann', 'Ann Lee', 'Bob'],
+            self: 'Ann',
+        })
+    );
+    assert.deepEqual(
+        [...html.matchAll(/<span class="([^"]+)">([^<]*)<\/span>/g)].map(
+            (m) => [m[1], m[2]]
+        ),
+        [
+            ['mention', '@Ann Lee'],
+            ['mention me', '@ann'],
+        ]
+    );
+    assert.equal(mentions('Ping @Bob!', 'Bob'), true);
+    assert.equal(mentions('Ping @Bobby', 'Bob'), false);
+    assert.equal(mentions('```\n@Bob\n```', 'Bob'), false);
+    assert.deepEqual(mentionQuery('Hey @b', 6, ['Ann', 'Bob', 'Abby']), {
+        start: 4,
+        end: 6,
+        results: ['Bob', 'Abby'],
+    });
+    assert.equal(mentionQuery('email@b', 7, ['Bob']), null);
+});

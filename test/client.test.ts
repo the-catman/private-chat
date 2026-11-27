@@ -705,3 +705,120 @@ test('a browser that lost its Signal sessions starts a new one and reads new mes
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(sent.length, 1);
 });
+
+test('reactions toggle in order, keep the newest signed set, and go with their message; replies survive edits', async () => {
+    const [alice, bob, mallory] = await Promise.all(
+        Array.from({ length: 3 }, () => createIdentity())
+    );
+    const boot = crypto.randomUUID();
+    const { client, sent } = clientFor(alice, [alice, bob, mallory], boot);
+    // The relay echoes each envelope to its author before acknowledging it.
+    client.wire = (packet: ClientPacket) => {
+        if (packet.type !== 'envelope') return;
+        sent.push(packet.envelope);
+        queueMicrotask(async () => {
+            await client.receive({
+                type: 'message',
+                envelope: packet.envelope,
+                received: Date.now(),
+            });
+            await client.receive({ type: 'ack', id: packet.envelope.id });
+        });
+    };
+    const original = await seal(bob, [alice, bob], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'React to this',
+    });
+    await client.receive({ type: 'message', envelope: original, received: 1 });
+    const mine = () =>
+        client.state.reactions[original.id]?.[alice.id]?.emoji ?? [];
+
+    // Two quick clicks on the same emoji cancel out.
+    await Promise.all([
+        client.react(original.id, '👍'),
+        client.react(original.id, '👍'),
+    ]);
+    assert.deepEqual(mine(), []);
+    await client.react(original.id, '🎉');
+    assert.deepEqual(mine(), ['🎉']);
+    await assert.rejects(client.react(original.id, 'hello'), /Invalid/);
+
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+    const reaction = (emoji: string[]) =>
+        seal(
+            bob,
+            [alice, bob],
+            boot,
+            'room',
+            'react',
+            {
+                kind: 'reaction',
+                emoji,
+            },
+            { targets: [original.id] }
+        );
+    const older = await reaction(['👀']);
+    await tick();
+    const newer = await reaction(['❤️']);
+    for (const envelope of [newer, older])
+        await client.receive({ type: 'message', envelope, received: 2 });
+    assert.deepEqual(client.state.reactions[original.id]?.[bob.id]?.emoji, [
+        '❤️',
+    ]);
+
+    // Only people who received the message can react to it.
+    const outsider = await seal(
+        mallory,
+        [alice, mallory],
+        boot,
+        'room',
+        'react',
+        { kind: 'reaction', emoji: ['😈'] },
+        { targets: [original.id] }
+    );
+    await assert.rejects(
+        client.receive({ type: 'message', envelope: outsider, received: 3 }),
+        /Invalid reaction or pin/
+    );
+    const pin = await seal(
+        bob,
+        [alice, bob],
+        boot,
+        'room',
+        'pin',
+        { kind: 'pin', pinned: true },
+        { targets: [original.id] }
+    );
+    await client.receive({ type: 'message', envelope: pin, received: 4 });
+    assert.equal(client.state.pins[original.id]?.pinned, true);
+    await client.pin(original.id, false);
+    assert.equal(client.state.pins[original.id]?.pinned, false);
+    assert.equal(client.state.pins[original.id]?.by, alice.id);
+
+    const reply = await seal(alice, [alice, bob], boot, 'room', 'chat', {
+        kind: 'text',
+        text: 'A reply',
+        reply: original.id,
+    });
+    await client.receive({ type: 'message', envelope: reply, received: 5 });
+    await client.edit(reply.id, 'An edited reply');
+    assert.deepEqual(await open(alice, alice, boot, sent.at(-1)!), {
+        kind: 'text',
+        text: 'An edited reply',
+        reply: original.id,
+    });
+
+    const removal = await seal(
+        bob,
+        [alice, bob],
+        boot,
+        'room',
+        'delete',
+        { kind: 'delete' },
+        { targets: [original.id] }
+    );
+    await client.receive({ type: 'message', envelope: removal, received: 6 });
+    assert.equal(client.state.reactions[original.id], undefined);
+    assert.equal(client.state.pins[original.id], undefined);
+    clearTimeout(client.noticeTimer);
+});

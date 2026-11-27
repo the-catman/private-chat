@@ -10,7 +10,7 @@ export const partCount = (size: number) =>
 // Larger files download only when someone opens them.
 export const AUTO_FETCH_BYTES = 8 * 1024 * 1024;
 // Bump when client and relay must be restarted together.
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;
 export const MAX_ENCRYPTED_LENGTH = 2_800_000;
 export const MAX_BATCH = 100;
 export const normalizeName = (name: string) =>
@@ -18,3 +18,5 @@ export const normalizeName = (name: string) =>
 export const nameKey = (name: string) => normalizeName(name).toLowerCase();
 export const validName = (name: string) =>
     name.length > 0 && name.length <= 32 && !/[\p{Cc}\p{Cf}]/u.test(name);
+// Distinct reactions one person can leave on one message.
+export const MAX_REACTIONS = 8;

@@ -30,6 +30,7 @@ import { createDevFrontend } from '../server/frontend';
 import NodeWebSocket from 'ws';
 import { observeSpeaking, checkSpeaking } from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
+import { checkMessageFeatures } from './message-feature-checks';
 import { checkMobileLayout } from './mobile-checks';
 import { checkUiChanges, checkPanelGestures } from './ui-checks';
 import {
@@ -429,6 +430,7 @@ async function run() {
     if (process.env.TEST_SHORTCUTS === '1') {
         await checkMessageShortcuts(alice.page, bob.page);
         await checkMessageLayout(alice.page, bob.page);
+        await checkMessageFeatures(alice.page, bob.page);
         assert.deepEqual(errors, []);
         return;
     }
@@ -1230,6 +1232,7 @@ async function run() {
 
     await checkMessageShortcuts(alice.page, bob.page);
     await checkMessageLayout(alice.page, bob.page);
+    await checkMessageFeatures(alice.page, bob.page);
 
     await checkUiChanges(alice.page, bob.page);
     await checkMobileLayout(alice.page, bob.page);

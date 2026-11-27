@@ -39,8 +39,9 @@ import {
     PART_BYTES,
     AUTO_FETCH_BYTES,
     PROTOCOL,
+    MAX_REACTIONS,
 } from './limits.ts';
-import { validateContent } from './content.ts';
+import { validateContent, validatePin, validateReaction } from './content.ts';
 import { replaceEmoji } from './emoji.ts';
 import { CallEngine } from './rtc.ts';
 import {
@@ -96,6 +97,8 @@ const initial = (): ChatState => ({
     notice: '',
     typing: {},
     unread: {},
+    reactions: {},
+    pins: {},
     config: null,
     call: null,
 });
@@ -581,6 +584,8 @@ export class ChatClient {
                 ),
                 unread: {},
                 typing: {},
+                reactions: {},
+                pins: {},
             });
             return;
         }
@@ -641,6 +646,7 @@ export class ChatClient {
                         m.historyGrant?.id ?? '',
                     ])
                 );
+            const notes = this.withoutNotes(removed.map((m) => m.id));
             for (const [id, envelope] of this.pending) {
                 if (envelope.scope !== packet.scope || !before(envelope.time))
                     continue;
@@ -659,6 +665,7 @@ export class ChatClient {
                 messages: this.state.messages.filter(
                     (m) => !removed.includes(m)
                 ),
+                ...notes,
                 ...(recent && {
                     presence:
                         packet.scope === 'room' ? [] : this.state.presence,
@@ -872,7 +879,56 @@ export class ChatClient {
             );
             this.update({
                 messages: this.state.messages.filter((item) => !removed(item)),
+                ...this.withoutNotes(
+                    this.state.messages.filter(removed).map((item) => item.id)
+                ),
             });
+            return;
+        }
+        if (m.type === 'react' || m.type === 'pin') {
+            const target = m.targets![0]!;
+            const message = this.state.messages.find((x) => x.id === target);
+            // Only someone who can see a message can react to or pin it.
+            if (
+                message &&
+                (message.scope !== m.scope ||
+                    !message.audience.includes(m.from))
+            )
+                throw new Error('Invalid reaction or pin.');
+            if (m.type === 'react') {
+                const emoji = validateReaction(decrypted);
+                const byAuthor = { ...this.state.reactions[target] };
+                const previous = byAuthor[m.from];
+                // Keep the newest signed set if the relay replays an older one.
+                if (previous && previous.time > m.time) return;
+                if (previous) this.identity.ratchet.forget([previous.envelope]);
+                byAuthor[m.from] = {
+                    scope: m.scope,
+                    emoji,
+                    time: m.time,
+                    envelope: m.id,
+                };
+                this.update({
+                    reactions: { ...this.state.reactions, [target]: byAuthor },
+                });
+            } else {
+                const pinned = validatePin(decrypted);
+                const previous = this.state.pins[target];
+                if (previous && previous.time > m.time) return;
+                if (previous) this.identity.ratchet.forget([previous.envelope]);
+                this.update({
+                    pins: {
+                        ...this.state.pins,
+                        [target]: {
+                            scope: m.scope,
+                            pinned,
+                            by: m.from,
+                            time: m.time,
+                            envelope: m.id,
+                        },
+                    },
+                });
+            }
             return;
         }
         let envelope = m;
@@ -1237,6 +1293,7 @@ export class ChatClient {
         const payload = validateContent({
             kind: 'text',
             text: replaceEmoji(text.trim()),
+            reply: message.payload.reply,
         });
         if (!text.trim())
             throw new Error('Use Delete to remove an empty message.');
@@ -1285,6 +1342,74 @@ export class ChatClient {
                 { targets: ids }
             )
         );
+    }
+    // Toggle one emoji. Changes run in order, each from the latest state, so
+    // quick repeated clicks settle on what the person last chose.
+    react(id: string, emoji: string) {
+        const run = this.notes.then(async () => {
+            const message = this.sentMessage(id);
+            const mine = this.state.reactions[id]?.[this.identity.id]?.emoji;
+            const current = mine ?? [];
+            const next = current.includes(emoji)
+                ? current.filter((value) => value !== emoji)
+                : [...current, emoji];
+            if (next.length > MAX_REACTIONS)
+                throw new Error(
+                    `You can add up to ${MAX_REACTIONS} reactions to a message.`
+                );
+            validateReaction({ kind: 'reaction', emoji: next });
+            await this.note(message, 'react', {
+                kind: 'reaction',
+                emoji: next,
+            });
+        });
+        this.notes = run.catch(() => {});
+        return run;
+    }
+    pin(id: string, pinned: boolean) {
+        const run = this.notes.then(() =>
+            this.note(this.sentMessage(id), 'pin', { kind: 'pin', pinned })
+        );
+        this.notes = run.catch(() => {});
+        return run;
+    }
+    private notes = Promise.resolve();
+    private sentMessage(id: string) {
+        const message = this.state.messages.find((m) => m.id === id);
+        if (!message || message.status !== 'sent')
+            throw new Error('That message is no longer available.');
+        return message;
+    }
+    private async note(
+        message: Message,
+        type: 'react' | 'pin',
+        content: unknown
+    ) {
+        await this.commit(
+            await seal(
+                this.identity,
+                this.audience(message.audience),
+                this.state.config!.boot,
+                message.scope,
+                type,
+                content,
+                { targets: [message.id] }
+            )
+        );
+    }
+    // Reactions and pins go with their message, along with their keys.
+    private withoutNotes(ids: string[]) {
+        const reactions = { ...this.state.reactions };
+        const pins = { ...this.state.pins };
+        for (const id of ids) {
+            this.identity.ratchet.forget([
+                ...Object.values(reactions[id] || {}).map((r) => r.envelope),
+                pins[id]?.envelope ?? '',
+            ]);
+            delete reactions[id];
+            delete pins[id];
+        }
+        return { reactions, pins };
     }
     async shareHistory(
         ids: string[],

@@ -34,7 +34,15 @@ export type Envelope = {
     id: string;
     from: string;
     scope: string;
-    type: 'chat' | 'signal' | 'typing' | 'edit' | 'delete' | 'share';
+    type:
+        | 'chat'
+        | 'signal'
+        | 'typing'
+        | 'edit'
+        | 'delete'
+        | 'share'
+        | 'react'
+        | 'pin';
     targets?: string[];
     revision?: string;
     parts?: number;
@@ -47,7 +55,8 @@ export type Envelope = {
     sig: string;
 };
 export type Content =
-    | { kind: 'text'; text: string }
+    // A reply names the message it answers; the quote is shown from history.
+    | { kind: 'text'; text: string; reply?: string }
     | { kind: 'voice'; audio: string; mime: string; duration: number }
     | {
           kind: 'file';
@@ -74,6 +83,21 @@ export type Message = {
     bytes?: Uint8Array<ArrayBuffer>;
     progress?: number;
     unavailable?: boolean;
+};
+// The latest signed reaction set from one person on one message.
+export type Reaction = {
+    scope: string;
+    emoji: string[];
+    time: number;
+    envelope: string;
+};
+// The latest signed pin change on one message, kept even after an unpin.
+export type Pin = {
+    scope: string;
+    pinned: boolean;
+    by: string;
+    time: number;
+    envelope: string;
 };
 export type Presence = {
     id: string;
@@ -204,6 +228,9 @@ export type ChatState = {
     notice: string;
     typing: Record<string, number>;
     unread: Record<string, number>;
+    // By message ID, then by author.
+    reactions: Record<string, Record<string, Reaction>>;
+    pins: Record<string, Pin>;
     config: SessionConfig | null;
     call: CallState | null;
 };

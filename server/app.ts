@@ -80,6 +80,8 @@ type StoredMessage = {
     received: number;
     audience: Set<string>;
     grants: Map<string, Envelope>;
+    // The latest pin and each person's latest reactions, still encrypted.
+    notes: Map<string, Envelope>;
     bytes: number;
     // Encrypted file part frames, relayed exactly as the author sent them.
     parts?: Buffer[];
@@ -531,9 +533,16 @@ export function createChatServer(
             !UUID.test(m.id) ||
             m.from !== from ||
             !validScope(m.scope, from) ||
-            !['chat', 'signal', 'typing', 'edit', 'delete', 'share'].includes(
-                m.type
-            ) ||
+            ![
+                'chat',
+                'signal',
+                'typing',
+                'edit',
+                'delete',
+                'share',
+                'react',
+                'pin',
+            ].includes(m.type) ||
             !Number.isSafeInteger(m.time)
         )
             return false;
@@ -548,7 +557,7 @@ export function createChatServer(
         if (
             !ids.length ||
             ids.length >
-                (['edit', 'delete'].includes(m.type)
+                (['edit', 'delete', 'react', 'pin'].includes(m.type)
                     ? 256
                     : config.maxClients) ||
             !ids.includes(from)
@@ -563,12 +572,14 @@ export function createChatServer(
             return false;
         if (!['chat', 'edit'].includes(m.type) && m.data.length > 100_000)
             return false;
+        if (['react', 'pin'].includes(m.type) && m.data.length > 2048)
+            return false;
         if (
             ['signal', 'typing'].includes(m.type) &&
             Math.abs(Date.now() - m.time) > 60_000
         )
             return false;
-        if (['edit', 'delete', 'share'].includes(m.type)) {
+        if (['edit', 'delete', 'share', 'react', 'pin'].includes(m.type)) {
             if (
                 !Array.isArray(m.targets) ||
                 !m.targets.length ||
@@ -578,11 +589,11 @@ export function createChatServer(
             )
                 return false;
             if (
-                m.type !== 'delete' &&
-                (typeof m.revision !== 'string' || !UUID.test(m.revision))
+                ['edit', 'share'].includes(m.type)
+                    ? typeof m.revision !== 'string' || !UUID.test(m.revision)
+                    : m.revision !== undefined
             )
                 return false;
-            if (m.type === 'delete' && m.revision !== undefined) return false;
             if (m.type === 'share' && (m.scope !== 'room' || ids.length !== 2))
                 return false;
         } else if (m.targets !== undefined || m.revision !== undefined)
@@ -936,6 +947,7 @@ export function createChatServer(
                 received: Date.now(),
                 audience: new Set(keys),
                 grants: new Map(),
+                notes: new Map(),
                 bytes: reserved,
             };
             history.set(m.id, record);
@@ -1000,6 +1012,38 @@ export function createChatServer(
             // Validate the entire batch before removing any ciphertext.
             for (const id of m.targets!) drop(id, true);
             for (const id of audience) {
+                const target = members.get(id)?.ws;
+                if (target)
+                    send(target, {
+                        type: 'message',
+                        envelope: m,
+                        received: Date.now(),
+                    });
+            }
+        } else if (m.type === 'react' || m.type === 'pin') {
+            const record = history.get(m.targets![0]);
+            if (
+                !record ||
+                record.upload ||
+                record.envelope.scope !== m.scope ||
+                !record.audience.has(member.id)
+            )
+                return fail('That message is no longer available.');
+            if (!sameAudience(record.audience))
+                return fail('Message recipients changed. Please try again.');
+            // Only the newest of each is kept, so this never grows past one
+            // pin and one reaction set per person.
+            const key = m.type === 'pin' ? 'pin' : `react:${member.id}`;
+            const previous = record.notes.get(key);
+            const delta = size - (previous ? envelopeBytes(previous) : 0);
+            if (full(delta))
+                return fail(
+                    'Server memory is full. Delete some messages first.'
+                );
+            record.notes.set(key, m);
+            record.bytes += delta;
+            historyBytes += delta;
+            for (const id of record.audience) {
                 const target = members.get(id)?.ws;
                 if (target)
                     send(target, {
@@ -1162,6 +1206,15 @@ export function createChatServer(
                 : {}),
         };
         send(ws, packet);
+        // Reactions and pins made before someone was given this history were
+        // not encrypted for them.
+        for (const note of record.notes.values())
+            if (Object.hasOwn(note.keys, id))
+                send(ws, {
+                    type: 'message',
+                    envelope: note,
+                    received: record.received,
+                });
     }
 
     // Stream requested parts without filling the socket queue. History

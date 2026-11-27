@@ -1,6 +1,7 @@
 import React, {
     useEffect,
     useLayoutEffect,
+    useMemo,
     useRef,
     useState,
     useSyncExternalStore,
@@ -9,11 +10,19 @@ import { createRoot } from 'react-dom/client';
 import { ChatClient } from './lib/client';
 import { b64, unb64, dmScope, safetyCode, partHashes } from './lib/crypto';
 import { Icon } from './Icon';
-import type { Peer, ChatState, Content, Message } from './types';
+import type { Peer, ChatState, Content, Message, Reaction } from './types';
 import { Avatar, IconButton, color, minutes } from './components/Common';
 import { CallPanel } from './components/CallPanel';
 import { AppearanceControls } from './components/Appearance';
 import { EmojiPicker } from './components/EmojiPicker';
+import {
+    PinnedPanel,
+    ReactionPicker,
+    Reactions,
+    ReplyQuote,
+    snippet,
+} from './components/MessageExtras';
+import { mentionQuery, mentions } from './lib/mentions';
 import { LogoutDialog } from './components/LogoutDialog';
 import { MarkdownMessage, MarkdownHelp } from './components/MarkdownMessage';
 import {
@@ -213,10 +222,26 @@ const inDialog = (event: React.SyntheticEvent) =>
 // Messages from one person within a few minutes share a single header.
 const GROUP_MS = 5 * 60_000;
 
+// What a message needs from the conversation around it.
+type MessageContext = {
+    self: string;
+    selfName: string;
+    names: string[];
+    online: boolean;
+    nameOf: (id: string) => string;
+    react: (message: Message, trigger: HTMLElement) => void;
+    reply: (message: Message) => void;
+    jump: (id: string) => void;
+};
+
 function ChatMessage({
     message,
-    self,
+    context,
     continued,
+    reactions,
+    pinned,
+    parent,
+    mentioned,
     selectionMode,
     selected,
     toggle,
@@ -227,8 +252,12 @@ function ChatMessage({
     closeEditor,
 }: {
     message: Message;
-    self: string;
+    context: MessageContext;
     continued: boolean;
+    reactions: Record<string, Reaction> | undefined;
+    pinned: boolean;
+    parent: Message | undefined;
+    mentioned: boolean;
     selectionMode: boolean;
     selected: boolean;
     toggle: (id: string, range?: boolean) => void;
@@ -238,10 +267,14 @@ function ChatMessage({
     editing: boolean;
     closeEditor: () => void;
 }) {
+    const { self } = context;
     const mine = message.from === self;
+    const reply =
+        message.payload.kind === 'text' ? message.payload.reply : undefined;
+    const ready = message.status === 'sent' && context.online;
     return (
         <article
-            className={`message ${mine ? 'mine' : ''} ${continued ? 'continued' : ''} ${selected ? 'is-selected' : ''}`}
+            className={`message ${mine ? 'mine' : ''} ${continued ? 'continued' : ''} ${mentioned ? 'mentioned' : ''} ${selected ? 'is-selected' : ''}`}
             data-testid="chat-message"
             data-message-id={message.id}
             tabIndex={0}
@@ -324,6 +357,7 @@ function ChatMessage({
                 <Avatar id={message.from} name={message.name} />
             )}
             <div className="message-main">
+                {reply && <ReplyQuote parent={parent} jump={context.jump} />}
                 <div
                     className={`message-meta ${continued ? 'visually-hidden' : ''}`}
                 >
@@ -357,8 +391,18 @@ function ChatMessage({
                             />
                         </span>
                     )}
+                    {pinned && !continued && (
+                        <span className="message-note pinned-note">
+                            <Icon name="pin" size={12} /> Pinned
+                        </span>
+                    )}
                 </div>
                 {message.edited && <span className="message-note">edited</span>}
+                {pinned && continued && (
+                    <span className="message-note pinned-note">
+                        <Icon name="pin" size={12} /> Pinned
+                    </span>
+                )}
                 {message.sharedBy && (
                     <span className="message-note">
                         History shared by {message.sharedBy}
@@ -385,10 +429,29 @@ function ChatMessage({
                                 fetch={() => client.fetchFile(message.id)}
                             />
                         ) : (
-                            <MarkdownMessage text={message.payload.text} />
+                            <MarkdownMessage
+                                text={message.payload.text}
+                                names={context.names}
+                                self={context.selfName}
+                            />
                         )}
                     </MessageBoundary>
                 )}
+                <Reactions
+                    reactions={reactions}
+                    scope={message.scope}
+                    self={self}
+                    name={context.nameOf}
+                    disabled={!ready}
+                    toggle={(emoji) =>
+                        void client
+                            .react(message.id, emoji)
+                            .catch((error: Error) =>
+                                client.notify(error.message)
+                            )
+                    }
+                    add={(trigger) => context.react(message, trigger)}
+                />
                 {message.status === 'failed' && (
                     <button
                         className="retry-message"
@@ -399,23 +462,47 @@ function ChatMessage({
                 )}
             </div>
             {!editing && (
-                <button
-                    className="icon-button message-more"
-                    aria-label={`Actions for message from ${message.name}`}
-                    title="Message actions"
-                    onClick={(event) => {
-                        const rect =
-                            event.currentTarget.getBoundingClientRect();
-                        menu(
-                            message,
-                            rect.right,
-                            rect.bottom,
-                            event.currentTarget
-                        );
-                    }}
-                >
-                    <Icon name="more" />
-                </button>
+                <div className="message-actions">
+                    {ready && (
+                        <>
+                            <button
+                                className="icon-button quick-action"
+                                aria-label="Add reaction"
+                                title="Add reaction"
+                                onClick={(event) =>
+                                    context.react(message, event.currentTarget)
+                                }
+                            >
+                                <Icon name="smile" size={18} />
+                            </button>
+                            <button
+                                className="icon-button quick-action"
+                                aria-label="Reply"
+                                title="Reply"
+                                onClick={() => context.reply(message)}
+                            >
+                                <Icon name="reply" size={18} />
+                            </button>
+                        </>
+                    )}
+                    <button
+                        className="icon-button message-more"
+                        aria-label={`Actions for message from ${message.name}`}
+                        title="Message actions"
+                        onClick={(event) => {
+                            const rect =
+                                event.currentTarget.getBoundingClientRect();
+                            menu(
+                                message,
+                                rect.right,
+                                rect.bottom,
+                                event.currentTarget
+                            );
+                        }}
+                    >
+                        <Icon name="more" />
+                    </button>
+                </div>
             )}
         </article>
     );
@@ -424,10 +511,16 @@ function ChatMessage({
 function Composer({
     state,
     recipient,
+    mentionNames,
+    reply,
+    cancelReply,
     editLast,
 }: {
     state: ChatState;
     recipient?: Peer;
+    mentionNames: string[];
+    reply?: Message;
+    cancelReply: () => void;
     editLast: () => void;
 }) {
     const mobile = useMobileLayout();
@@ -474,10 +567,30 @@ function Composer({
         if (completedSend?.scope === currentScope.current)
             input.current?.focus({ preventScroll: true });
     }, [completedSend]);
+    const suggesting = !emojiDismissed && !emojis && !file && !voice;
+    const mention = suggesting
+        ? mentionQuery(
+              text,
+              cursor,
+              mentionNames.filter((name) => name !== state.name)
+          )
+        : null;
     const suggestions =
-        !emojiDismissed && !emojis && !file && !voice
-            ? emojiQuery(text, cursor)
-            : null;
+        suggesting && !mention ? emojiQuery(text, cursor) : null;
+    const insertMention = (name: string) => {
+        if (!mention) return;
+        const value = `${text.slice(0, mention.start)}@${name} ${text.slice(mention.end)}`;
+        if (value.length > 4000) return;
+        const caret = mention.start + name.length + 2;
+        setDrafts((values) => ({ ...values, [state.scope]: value }));
+        setCursor(caret);
+        setEmojiDismissed(true);
+        setEmojiIndex(0);
+        requestAnimationFrame(() => {
+            input.current?.focus();
+            input.current?.setSelectionRange(caret, caret);
+        });
+    };
     const chooseEmoji = (emoji: string) => {
         const start = input.current?.selectionStart ?? text.length;
         const end = input.current?.selectionEnd ?? start;
@@ -528,7 +641,7 @@ function Composer({
         state.phase !== 'online' ||
         (state.scope !== 'room' && !recipient?.online);
     useEffect(() => {
-        if (!suggestions) return;
+        if (!suggestions && !mention) return;
         const dismiss = (event: PointerEvent) => {
             if (
                 !suggestionPanel.current?.contains(event.target as Node) &&
@@ -538,7 +651,7 @@ function Composer({
         };
         document.addEventListener('pointerdown', dismiss);
         return () => document.removeEventListener('pointerdown', dismiss);
-    }, [Boolean(suggestions)]);
+    }, [Boolean(suggestions || mention)]);
     useEffect(() => {
         if (offline || recording) {
             setEmojis(false);
@@ -678,9 +791,11 @@ function Composer({
         setSending(true);
         setEmojis(false);
         setEmojiDismissed(true);
+        const replying = isText ? reply?.id : undefined;
         if (isText) {
             // Keep the editor live while encryption runs. Completion must not
             // clear anything the user has already typed for their next message.
+            if (replying) cancelReply();
             setDrafts((values) => ({ ...values, [scope]: '' }));
             setCursor(0);
             input.current?.focus({ preventScroll: true });
@@ -697,7 +812,11 @@ function Composer({
                       size: bytes.length,
                       hashes: await partHashes(bytes),
                   }
-                : voice || { kind: 'text', text: replaceEmoji(text.trim()) };
+                : voice || {
+                      kind: 'text',
+                      text: replaceEmoji(text.trim()),
+                      ...(replying && { reply: replying }),
+                  };
             await client.send(payload, scope, bytes);
             if (file) setFile((current) => (current === file ? null : current));
             else if (voice)
@@ -772,6 +891,23 @@ function Composer({
                     </>
                 )}
             </div>
+            {reply && (
+                <div className="reply-bar">
+                    <Icon name="reply" size={15} />
+                    <span>
+                        Replying to <strong>{reply.name}</strong>
+                        <small>{snippet(reply)}</small>
+                    </span>
+                    <IconButton
+                        icon="close"
+                        label="Cancel reply"
+                        onClick={() => {
+                            cancelReply();
+                            input.current?.focus();
+                        }}
+                    />
+                </div>
+            )}
             {voice && (
                 <div className="voice-preview">
                     <VoiceNote content={voice} />
@@ -839,12 +975,17 @@ function Composer({
                                 key={state.scope}
                                 ref={input}
                                 suggestions={
-                                    suggestions
+                                    mention
                                         ? {
-                                              controls: 'emoji-suggestions',
-                                              active: `emoji-option-${Math.min(emojiIndex, suggestions.results.length - 1)}`,
+                                              controls: 'mention-suggestions',
+                                              active: `mention-option-${Math.min(emojiIndex, mention.results.length - 1)}`,
                                           }
-                                        : undefined
+                                        : suggestions
+                                          ? {
+                                                controls: 'emoji-suggestions',
+                                                active: `emoji-option-${Math.min(emojiIndex, suggestions.results.length - 1)}`,
+                                            }
+                                          : undefined
                                 }
                                 label={
                                     recipient
@@ -899,8 +1040,9 @@ function Composer({
                                 }
                                 onKeyDown={(event) => {
                                     if (event.isComposing) return;
+                                    const list = mention ?? suggestions;
                                     if (
-                                        suggestions &&
+                                        list &&
                                         [
                                             'ArrowDown',
                                             'ArrowUp',
@@ -923,20 +1065,28 @@ function Composer({
                                                         'ArrowDown'
                                                             ? 1
                                                             : -1) +
-                                                        suggestions.results
-                                                            .length) %
-                                                    suggestions.results.length
+                                                        list.results.length) %
+                                                    list.results.length
                                             );
-                                        else
-                                            insertEmoji(
-                                                suggestions.results[
-                                                    Math.min(
-                                                        emojiIndex,
-                                                        suggestions.results
-                                                            .length - 1
-                                                    )
-                                                ]
+                                        else {
+                                            const index = Math.min(
+                                                emojiIndex,
+                                                list.results.length - 1
                                             );
+                                            if (mention)
+                                                insertMention(
+                                                    mention.results[index]!
+                                                );
+                                            else
+                                                insertEmoji(
+                                                    suggestions!.results[index]
+                                                );
+                                        }
+                                        return;
+                                    }
+                                    if (event.key === 'Escape' && reply) {
+                                        event.preventDefault();
+                                        cancelReply();
                                         return;
                                     }
                                     if (
@@ -1050,6 +1200,35 @@ function Composer({
                         </>
                     )}
                 </div>
+                {mention && (
+                    <div
+                        ref={suggestionPanel}
+                        className="emoji-suggestions mention-suggestions"
+                        id="mention-suggestions"
+                        role="listbox"
+                        aria-label="Mention suggestions"
+                    >
+                        {mention.results.map((name, index) => (
+                            <button
+                                key={name}
+                                id={`mention-option-${index}`}
+                                type="button"
+                                role="option"
+                                aria-selected={
+                                    index ===
+                                    Math.min(
+                                        emojiIndex,
+                                        mention.results.length - 1
+                                    )
+                                }
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => insertMention(name)}
+                            >
+                                <span>@{name}</span>
+                            </button>
+                        ))}
+                    </div>
+                )}
                 {suggestions && (
                     <div
                         ref={suggestionPanel}
@@ -1351,6 +1530,29 @@ function App() {
     const [selected, setSelected] = useState<string[]>([]);
     const [editing, setEditing] = useState<string | null>(null);
     const [actionDialog, setActionDialog] = useState<ActionDialog | null>(null);
+    // The message each conversation's next message replies to.
+    const [replyTo, setReplyTo] = useState<Record<string, string>>({});
+    const [reacting, setReacting] = useState<{
+        id: string;
+        anchor: HTMLElement;
+    } | null>(null);
+    const [pinsOpen, setPinsOpen] = useState(false);
+    const pinTrigger = useRef<HTMLSpanElement>(null);
+    // The people who can be mentioned here, stable while they stay the same.
+    const mentionKey = state.peers
+        .filter(
+            (p) =>
+                state.scope === 'room' ||
+                p.id === state.self ||
+                (state.self !== null &&
+                    dmScope(state.self, p.id) === state.scope)
+        )
+        .map((p) => p.name)
+        .join('\n');
+    const mentionNames = useMemo(
+        () => (mentionKey ? mentionKey.split('\n') : []),
+        [mentionKey]
+    );
     const [menu, setMenu] = useState<{
         id: string;
         x: number;
@@ -1394,6 +1596,8 @@ function App() {
     useEffect(() => {
         nearBottom.current = true;
         setAtLatest(true);
+        setPinsOpen(false);
+        setReacting(null);
         setSearch('');
         setSearchOpen(false);
         setSelected([]);
@@ -1620,9 +1824,99 @@ function App() {
             )
             .finally(() => deleting.current.delete(message.id));
     };
+    const byId = new Map(state.messages.map((m) => [m.id, m]));
+    const nameOf = (id: string) =>
+        state.peers.find((p) => p.id === id)?.name ?? 'Someone';
+    const isPinned = (message: Message) =>
+        state.pins[message.id]?.pinned === true &&
+        state.pins[message.id]!.scope === message.scope;
+    const pinnedMessages = conversationMessages
+        .filter(isPinned)
+        .sort((a, b) => state.pins[b.id]!.time - state.pins[a.id]!.time);
+    const replyMessage = byId.get(replyTo[state.scope] ?? '');
+    const focusComposer = () =>
+        document
+            .querySelector<HTMLElement>('.composer [role="textbox"]')
+            ?.focus();
+    // Bring a message into view and briefly highlight it.
+    const jumpTo = (id: string) => {
+        setPinsOpen(false);
+        setSearch('');
+        requestAnimationFrame(() => {
+            const element = scroll.current?.querySelector<HTMLElement>(
+                `[data-message-id="${CSS.escape(id)}"]`
+            );
+            if (!element) {
+                client.notify('That message is no longer available.');
+                return;
+            }
+            element.scrollIntoView({
+                block: 'center',
+                behavior: matchMedia('(prefers-reduced-motion: reduce)').matches
+                    ? 'auto'
+                    : 'smooth',
+            });
+            element.focus({ preventScroll: true });
+            element.classList.remove('flash');
+            void element.offsetWidth;
+            element.classList.add('flash');
+            setTimeout(() => element.classList.remove('flash'), 1600);
+        });
+    };
+    const startReply = (message: Message) => {
+        setMenu(null);
+        setReplyTo((values) => ({ ...values, [message.scope]: message.id }));
+        requestAnimationFrame(focusComposer);
+    };
+    const togglePin = (message: Message) =>
+        void client
+            .pin(message.id, !isPinned(message))
+            .catch((error: Error) => client.notify(error.message));
+    const messageContext: MessageContext = {
+        self,
+        selfName: state.name,
+        names: mentionNames,
+        online: state.phase === 'online',
+        nameOf,
+        react: (message, anchor) => setReacting({ id: message.id, anchor }),
+        reply: startReply,
+        jump: jumpTo,
+    };
     const menuMessage = state.messages.find((m) => m.id === menu?.id);
+    const menuReady =
+        menuMessage?.status === 'sent' && state.phase === 'online';
     const menuActions: MenuAction[] = menuMessage
         ? [
+              {
+                  label: 'Reply',
+                  icon: 'reply',
+                  disabled: !menuReady,
+                  run: () => startReply(menuMessage),
+              },
+              {
+                  label: 'Add reaction',
+                  icon: 'smile',
+                  disabled: !menuReady,
+                  run: () => {
+                      const anchor =
+                          scroll.current?.querySelector<HTMLElement>(
+                              `[data-message-id="${CSS.escape(menuMessage.id)}"]`
+                          ) ?? menuOrigin.current;
+                      setMenu(null);
+                      if (anchor) setReacting({ id: menuMessage.id, anchor });
+                  },
+              },
+              {
+                  label: isPinned(menuMessage)
+                      ? 'Unpin message'
+                      : 'Pin message',
+                  icon: 'pin',
+                  disabled: !menuReady,
+                  run: () => {
+                      setMenu(null);
+                      togglePin(menuMessage);
+                  },
+              },
               ...(menuMessage.payload.kind === 'text'
                   ? [
                         {
@@ -1951,6 +2245,37 @@ function App() {
                                 />
                             </>
                         )}
+                        {pinnedMessages.length > 0 && (
+                            <span className="pinned-trigger" ref={pinTrigger}>
+                                <IconButton
+                                    icon="pin"
+                                    label="Pinned messages"
+                                    active={pinsOpen}
+                                    onClick={() => setPinsOpen(!pinsOpen)}
+                                />
+                                <b className="pinned-count" aria-hidden="true">
+                                    {pinnedMessages.length}
+                                </b>
+                                {pinsOpen && (
+                                    <PinnedPanel
+                                        messages={pinnedMessages}
+                                        trigger={pinTrigger}
+                                        jump={jumpTo}
+                                        unpin={(id) => {
+                                            const message = byId.get(id);
+                                            if (message) togglePin(message);
+                                        }}
+                                        close={(restoreFocus) => {
+                                            setPinsOpen(false);
+                                            if (restoreFocus)
+                                                pinTrigger.current
+                                                    ?.querySelector('button')
+                                                    ?.focus();
+                                        }}
+                                    />
+                                )}
+                            </span>
+                        )}
                         <ConversationActions
                             client={client}
                             scope={state.scope}
@@ -2149,10 +2474,40 @@ function App() {
                                     {item.type === 'message' ? (
                                         <ChatMessage
                                             message={item.message}
-                                            self={self}
+                                            context={messageContext}
+                                            reactions={state.reactions[item.id]}
+                                            pinned={isPinned(item.message)}
+                                            parent={
+                                                item.message.payload.kind ===
+                                                    'text' &&
+                                                item.message.payload.reply
+                                                    ? byId.get(
+                                                          item.message.payload
+                                                              .reply
+                                                      )
+                                                    : undefined
+                                            }
+                                            mentioned={
+                                                item.message.from !== self &&
+                                                item.message.payload.kind ===
+                                                    'text' &&
+                                                (mentions(
+                                                    item.message.payload.text,
+                                                    state.name
+                                                ) ||
+                                                    byId.get(
+                                                        item.message.payload
+                                                            .reply ?? ''
+                                                    )?.from === self)
+                                            }
                                             continued={
                                                 !newDay &&
                                                 !firstNew &&
+                                                !(
+                                                    item.message.payload
+                                                        .kind === 'text' &&
+                                                    item.message.payload.reply
+                                                ) &&
                                                 previous.type === 'message' &&
                                                 previous.message.from ===
                                                     item.message.from &&
@@ -2328,6 +2683,15 @@ function App() {
                 <Composer
                     state={state}
                     recipient={recipient}
+                    mentionNames={mentionNames}
+                    reply={replyMessage}
+                    cancelReply={() =>
+                        setReplyTo((values) => {
+                            const next = { ...values };
+                            delete next[state.scope];
+                            return next;
+                        })
+                    }
                     editLast={() => {
                         const latest = [...messages]
                             .reverse()
@@ -2411,6 +2775,25 @@ function App() {
                     y={menu.y}
                     actions={menuActions}
                     close={closeMenu}
+                />
+            )}
+            {reacting && (
+                <ReactionPicker
+                    anchor={reacting.anchor}
+                    choose={(emoji) => {
+                        void client
+                            .react(reacting.id, emoji)
+                            .catch((error: Error) =>
+                                client.notify(error.message)
+                            );
+                        setReacting(null);
+                        reacting.anchor.focus({ preventScroll: true });
+                    }}
+                    close={(restoreFocus) => {
+                        setReacting(null);
+                        if (restoreFocus)
+                            reacting.anchor.focus({ preventScroll: true });
+                    }}
                 />
             )}
             {actionDialog && (

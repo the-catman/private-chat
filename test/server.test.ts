@@ -1657,3 +1657,187 @@ test('calls admit only their members, bound transports and media, and refuse mal
         await f.app.close();
     }
 });
+
+test('reactions and pins reach only the message audience, keep only the latest, and go with their message', async () => {
+    const f = await fixture();
+    try {
+        const alice = await f.join('Alice');
+        const bob = await f.join('Bob');
+        const pair = [alice.identity, bob.identity];
+        const original = await seal(
+            alice.identity,
+            pair,
+            f.app.boot,
+            'room',
+            'chat',
+            { kind: 'text', text: 'React to me' }
+        );
+        await transmit(alice, original);
+        // Everyone in the audience, the author included, receives it.
+        await delivered(alice);
+        await delivered(bob);
+        const note = (
+            from: Identity,
+            audience: Identity[],
+            type: 'react' | 'pin',
+            content: unknown,
+            scope = 'room',
+            targets = [original.id]
+        ) =>
+            seal(from, audience, f.app.boot, scope, type, content, { targets });
+
+        const first = await note(bob.identity, pair, 'react', {
+            kind: 'reaction',
+            emoji: ['👍'],
+        });
+        await transmit(bob, first);
+        const seen = await delivered(alice);
+        assert.equal(seen.envelope.id, first.id);
+        assert.deepEqual(
+            await open(alice.identity, bob.identity, f.app.boot, seen.envelope),
+            { kind: 'reaction', emoji: ['👍'] }
+        );
+        const second = await note(bob.identity, pair, 'react', {
+            kind: 'reaction',
+            emoji: ['👍', '🎉'],
+        });
+        await transmit(bob, second);
+        const pin = await note(alice.identity, pair, 'pin', {
+            kind: 'pin',
+            pinned: true,
+        });
+        await transmit(alice, pin);
+
+        // Every reaction and pin must reach everyone who can read the message.
+        await transmit(
+            bob,
+            await note(bob.identity, [bob.identity], 'react', {
+                kind: 'reaction',
+                emoji: ['👀'],
+            }),
+            'error'
+        );
+        await transmit(
+            bob,
+            await note(
+                bob.identity,
+                pair,
+                'pin',
+                { kind: 'pin', pinned: false },
+                dmScope(alice.identity.id, bob.identity.id)
+            ),
+            'error'
+        );
+        await transmit(
+            bob,
+            await note(
+                bob.identity,
+                pair,
+                'react',
+                { kind: 'reaction', emoji: ['👀'] },
+                'room',
+                [crypto.randomUUID()]
+            ),
+            'error'
+        );
+
+        // Someone who never received the message cannot react to it.
+        const charlie = await f.join('Charlie');
+        const everyone = [...pair, charlie.identity];
+        await transmit(
+            charlie,
+            await note(charlie.identity, everyone, 'react', {
+                kind: 'reaction',
+                emoji: ['👀'],
+            }),
+            'error'
+        );
+
+        // A reconnect replays the message, then only the newest of each note.
+        const again = await f.join('Alice', alice.identity, alice.cookie);
+        const replay = again.packets.flatMap((packet) =>
+            packet.type === 'message' ? [packet.envelope.id] : []
+        );
+        assert.deepEqual(replay, [original.id, second.id, pin.id]);
+
+        // Notes made before history was shared were not encrypted for the
+        // new reader, so they are not sent; new ones must include them.
+        const key = await contentKey(
+            bob.identity,
+            alice.identity,
+            f.app.boot,
+            original
+        );
+        const grant = await seal(
+            bob.identity,
+            [bob.identity, charlie.identity],
+            f.app.boot,
+            'room',
+            'share',
+            { kind: 'history', key: b64(key) },
+            { targets: [original.id], revision: original.id }
+        );
+        key.fill(0);
+        await transmit(bob, grant);
+        assert.equal((await delivered(charlie)).envelope.id, grant.id);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.equal(
+            charlie.packets.filter((packet) => packet.type === 'message')
+                .length,
+            0
+        );
+        await transmit(
+            again,
+            await note(alice.identity, pair, 'react', {
+                kind: 'reaction',
+                emoji: ['❤️'],
+            }),
+            'error'
+        );
+        const shared = await note(alice.identity, everyone, 'react', {
+            kind: 'reaction',
+            emoji: ['❤️'],
+        });
+        await transmit(again, shared);
+        assert.equal((await delivered(charlie)).envelope.id, shared.id);
+
+        // Deleting the message removes its reactions and pin from RAM.
+        const before = f.app.stats().historyBytes;
+        await transmit(
+            again,
+            await seal(
+                alice.identity,
+                everyone,
+                f.app.boot,
+                'room',
+                'delete',
+                { kind: 'delete' },
+                { targets: [original.id] }
+            )
+        );
+        assert.ok(f.app.stats().historyBytes < before);
+        assert.equal(f.app.stats().historyBytes, 0);
+        const later = await f.join('Bob', bob.identity, bob.cookie);
+        assert.equal(
+            later.packets.filter((packet) => packet.type === 'message').length,
+            0
+        );
+
+        // Reactions and pins name exactly one message and no revision.
+        const malformed = await note(
+            charlie.identity,
+            everyone,
+            'pin',
+            { kind: 'pin', pinned: true },
+            'room',
+            [crypto.randomUUID(), crypto.randomUUID()]
+        );
+        charlie.ws.send(
+            JSON.stringify({ type: 'envelope', envelope: malformed })
+        );
+        const [code] = await once(charlie.ws, 'close');
+        assert.equal(code, 1008);
+    } finally {
+        await f.app.close();
+    }
+});

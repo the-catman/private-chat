@@ -163,7 +163,19 @@ export async function checkCallLayoutAndNoise(alice: Page, bob: Page) {
             .toBe(true);
     }
     const divider = alice.getByRole('separator', { name: 'Resize call panel' });
-    const initial = Number(await divider.getAttribute('aria-valuenow'));
+    // The panel follows the window size, so wait until it has settled.
+    let initial = NaN;
+    await expect
+        .poll(
+            async () => {
+                const now = Number(await divider.getAttribute('aria-valuenow'));
+                const settled = now === initial;
+                initial = now;
+                return settled;
+            },
+            { intervals: [200] }
+        )
+        .toBe(true);
     await divider.focus();
     await divider.press('ArrowDown');
     await expect(divider).toHaveAttribute(

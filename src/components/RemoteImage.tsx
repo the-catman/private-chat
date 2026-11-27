@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../Icon';
 import { useMobilePanel } from './useMobilePanel';
 import { SheetHandle } from './SheetHandle';
+import { withoutCode } from '../lib/mentions';
 
 // Images from links load through the server, so the sites hosting them never
 // see readers' addresses. Only the server fetches them.
@@ -12,13 +13,6 @@ export const proxied = (url: string) =>
 export const MAX_EMBEDS = 4;
 const LINK = /\bhttps?:\/\/[^\s<>()[\]"'`]+/gi;
 const MARKDOWN_IMAGE = /!\[[^\]\n]*\]\(\s*<?(https?:\/\/[^\s)>]+)/gi;
-const withoutCode = (text: string) =>
-    text
-        .replace(
-            /^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\1[^\n]*|$)/gm,
-            ' '
-        )
-        .replace(/`[^`\n]*`/g, ' ');
 // Like GFM autolinks, trailing punctuation is not part of the address.
 function imageLink(match: string) {
     const url = match.replace(/[.,!?;:*_~]+$/, '');
