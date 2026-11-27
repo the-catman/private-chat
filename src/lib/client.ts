@@ -9,6 +9,7 @@ import type {
     Signal,
     Message,
     CallState,
+    MediaState,
     PrekeyBundle,
 } from '../types';
 import type { SoundCue } from './sounds';
@@ -58,6 +59,31 @@ const inScope = (scope: string, id: string) => {
     );
 };
 
+// The call this tab was in, so a dropped connection or a reload can rejoin it.
+// Kept per tab, and only for the same server boot.
+type ResumeCall = Pick<MediaState, 'muted' | 'deafened'> & {
+    boot: string;
+    scope: string;
+};
+const CALL_KEY = 'hush-call';
+function storedCall(): ResumeCall | null {
+    try {
+        const value = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null');
+        return value &&
+            typeof value.boot === 'string' &&
+            typeof value.scope === 'string'
+            ? {
+                  boot: value.boot,
+                  scope: value.scope,
+                  muted: value.muted === true,
+                  deafened: value.deafened === true,
+              }
+            : null;
+    } catch {
+        return null;
+    }
+}
+
 const initial = (): ChatState => ({
     phase: 'loading',
     name: '',
@@ -80,8 +106,39 @@ export class ChatClient {
     private cue(cue: SoundCue) {
         if (!this.state.call?.deafened) this.sound(cue);
     }
+    private resumeCall = storedCall();
+    private rememberCall(call: CallState) {
+        const boot = this.state.config?.boot;
+        const old = this.resumeCall;
+        if (
+            !boot ||
+            (old?.boot === boot &&
+                old.scope === call.scope &&
+                old.muted === call.muted &&
+                old.deafened === call.deafened)
+        )
+            return;
+        this.resumeCall = {
+            boot,
+            scope: call.scope,
+            muted: call.muted,
+            deafened: call.deafened,
+        };
+        try {
+            sessionStorage.setItem(CALL_KEY, JSON.stringify(this.resumeCall));
+        } catch {}
+    }
+    private forgetCall() {
+        this.resumeCall = null;
+        try {
+            sessionStorage.removeItem(CALL_KEY);
+        } catch {}
+    }
     private setCall = (call: CallState | null) => {
         const previous = this.state.call;
+        // Ending the engine (a lost connection, a reload) keeps the call to
+        // rejoin; only leaving on purpose forgets it.
+        if (call) this.rememberCall(call);
         this.update({ call });
         if (call && !previous) this.cue('call-join');
         else if (!call && previous && !previous.deafened)
@@ -331,6 +388,7 @@ export class ChatClient {
             );
             this.rtc?.stop();
             if ([1008, 4001, 4004, 4009].includes(event.code)) {
+                this.forgetCall();
                 this.update({
                     phase: 'login',
                     error:
@@ -673,6 +731,8 @@ export class ChatClient {
             for (const envelope of this.pending.values())
                 if (envelope.boot === this.state.config!.boot)
                     this.transmit(envelope);
+            // Not awaited: joining waits on replies this queue delivers.
+            void this.rejoinCall();
             return;
         }
         if (packet.type === 'progress') {
@@ -1417,19 +1477,30 @@ export class ChatClient {
     select(scope: string) {
         this.update({ scope, unread: { ...this.state.unread, [scope]: 0 } });
     }
+    private async startCall(
+        scope: string,
+        video: boolean,
+        initial?: Pick<MediaState, 'muted' | 'deafened'>
+    ) {
+        this.recipients(scope);
+        if (!this.rtc) return;
+        if (this.rtc.scope) this.leaveCall();
+        this.rtc.members = this.state.peers;
+        try {
+            await this.rtc.join(scope, video, initial);
+        } catch (error) {
+            this.endCall();
+            throw error;
+        }
+        this.rtc.sync(this.state.peers);
+    }
     async joinCall(scope = this.state.scope, video = false) {
         if (this.joiningCall) return;
         this.joiningCall = true;
         try {
-            this.recipients(scope);
-            if (!this.rtc) return;
-            if (this.rtc.scope) this.leaveCall();
-            this.rtc.members = this.state.peers;
-            await this.rtc.join(scope, video);
-            this.rtc.sync(this.state.peers);
+            await this.startCall(scope, video);
         } catch (error) {
-            if (this.rtc?.scope) this.leaveCall();
-            else this.rtc?.stop();
+            this.forgetCall();
             this.notify(
                 error instanceof Error
                     ? error.message
@@ -1439,7 +1510,66 @@ export class ChatClient {
             this.joiningCall = false;
         }
     }
+    // Back into the call this tab was in, muted or deafened as before. A
+    // private call is rejoined only if the other person is still in it.
+    private async rejoinCall() {
+        const call = this.resumeCall;
+        if (!call || this.joiningCall || this.rtc?.scope) return;
+        if (
+            call.boot !== this.state.config?.boot ||
+            (call.scope !== 'room' &&
+                !this.state.peers.some(
+                    (p) =>
+                        p.id !== this.state.self &&
+                        p.online &&
+                        p.call === call.scope
+                ))
+        )
+            return this.forgetCall();
+        const current = () =>
+            this.resumeCall === call &&
+            this.state.phase === 'online' &&
+            !this.stopped &&
+            !this.rtc?.scope;
+        for (let attempt = 0; ; attempt++) {
+            if (attempt) {
+                // Waiting does not block joining another call meanwhile.
+                await new Promise((resolve) =>
+                    setTimeout(resolve, 2000 * 2 ** (attempt - 1))
+                );
+                if (!current() || this.joiningCall) return;
+            }
+            this.joiningCall = true;
+            try {
+                await this.startCall(call.scope, false, call);
+                return;
+            } catch (error) {
+                if (attempt === 2 || !current()) {
+                    if (this.resumeCall === call) {
+                        this.forgetCall();
+                        this.notify(
+                            error instanceof Error
+                                ? error.message
+                                : 'Could not rejoin the call.'
+                        );
+                    }
+                    return;
+                }
+            } finally {
+                this.joiningCall = false;
+            }
+        }
+    }
+    private endCall() {
+        const inCall = Boolean(this.rtc?.scope);
+        this.rtc?.stop();
+        if (inCall)
+            try {
+                this.wire({ type: 'call', scope: null });
+            } catch {}
+    }
     leaveCall() {
+        this.forgetCall();
         this.rtc?.stop();
         try {
             this.wire({ type: 'call', scope: null });
@@ -1447,6 +1577,7 @@ export class ChatClient {
     }
     async logout() {
         this.stopped = true;
+        this.forgetCall();
         this.cancelConfirmations('Signed out.');
         clearTimeout(this.retryTimer);
         this.rtc?.stop();

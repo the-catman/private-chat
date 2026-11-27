@@ -497,6 +497,16 @@ export async function checkFourPersonCall(pages: Page[]) {
     const page = pages[0];
     await expect(page.locator('.video-tile')).toHaveCount(4);
     for (const member of pages) await expectConnected(member, 4);
+    // A reload rejoins the call by itself, still muted, under new keys.
+    const reloaded = pages[1];
+    await reloaded
+        .getByRole('button', { name: 'Mute microphone', exact: true })
+        .click();
+    await reloaded.reload();
+    await expect(
+        reloaded.getByRole('button', { name: 'Unmute microphone', exact: true })
+    ).toBeVisible({ timeout: 15000 });
+    for (const member of pages) await expectConnected(member, 4);
     for (const viewport of [
         { width: 720, height: 475 },
         { width: 320, height: 640 },
@@ -524,7 +534,7 @@ export async function checkFourPersonCall(pages: Page[]) {
             .click();
     for (const member of pages) await checkCaptureCleanup(member);
     console.log(
-        'PASS: four-person call at minimum panel height/mobile sizes; leaving from pop-out ends capture'
+        'PASS: four-person call, rejoined muted after a reload, at minimum panel height/mobile sizes; leaving from pop-out ends capture'
     );
 }
 

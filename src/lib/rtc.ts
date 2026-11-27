@@ -141,12 +141,21 @@ export class CallEngine {
         const recv = this.recvTransport?.connectionState;
         if (send === 'failed' || recv === 'failed') return 'failed';
         return send === 'connected' &&
+            this.secure &&
+            !this.held &&
             this.keyed.has(id) &&
             (!remote.consumers.size || recv === 'connected')
             ? 'connected'
             : 'connecting';
     }
-    async join(scope: string, video: boolean) {
+    async join(
+        scope: string,
+        video: boolean,
+        initial: Pick<MediaState, 'muted' | 'deafened'> = {
+            muted: false,
+            deafened: false,
+        }
+    ) {
         if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection)
             throw new Error(
                 'Calling is not supported in this browser. Try a current Chrome, Firefox, or Safari.'
@@ -203,8 +212,7 @@ export class CallEngine {
             ? new MediaStream(stream.getVideoTracks())
             : null;
         this.state = {
-            muted: false,
-            deafened: false,
+            ...initial,
             camera: Boolean(this.media.camera),
             screen: false,
             screenAudio: false,
