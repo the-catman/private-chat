@@ -13,6 +13,7 @@
         "start": "node --import=tsx scripts/serve.ts node --env-file=.env --import=tsx server/index.ts",
         "test": "node --import=tsx --test test/*.test.ts",
         "test:browser": "node --import=tsx test/browser.ts",
+        "postinstall": "node --import=tsx scripts/patch-ts-mls.ts",
         "typecheck": "tsc --noEmit",
         "format": "prettier --write ."
     },

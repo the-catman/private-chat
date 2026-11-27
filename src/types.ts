@@ -152,8 +152,21 @@ export type MlsClientPacket =
           welcome?: string;
       };
 export type MlsServerPacket =
-    | { type: 'mls'; scope: string; action: 'create'; group: string }
-    | { type: 'mls'; scope: string; action: 'welcome'; welcome: string }
+    // Each names the key package it answers, so a late one is ignored.
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'create';
+          group: string;
+          version: string;
+      }
+    | {
+          type: 'mls';
+          scope: string;
+          action: 'welcome';
+          welcome: string;
+          version: string;
+      }
     | { type: 'mls'; scope: string; action: 'commit'; commit: string }
     | {
           type: 'mls';

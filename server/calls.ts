@@ -22,6 +22,8 @@ type Seat = {
     version?: string;
     keyPackage?: string;
     refused?: string;
+    // When this member last failed to answer as leader.
+    stalled?: number;
 };
 type Offer = {
     n: number;
@@ -57,7 +59,8 @@ const SOURCES: Record<MediaKind, 'audio' | 'video'> = {
     screen: 'video',
     system: 'audio',
 };
-const LEADER_MS = 10_000;
+// A leader that has not answered by then is passed over, not reset.
+const LEADER_MS = 5_000;
 
 export class CallError extends Error {}
 
@@ -360,8 +363,8 @@ export function createCalls(
         if (group && !valid(group.leader)) {
             clearTimeout(group.offer?.timer);
             group.offer = undefined;
-            const next = Array.from(group.entries.keys()).find(valid);
-            if (next) group.leader = next;
+            const next = successor(call, group.leader);
+            if (next) lead(call, next);
             else call.group = group = null;
         }
         if (!group) {
@@ -380,6 +383,7 @@ export function createCalls(
                 scope: call.scope,
                 action: 'create',
                 group: group.id,
+                version: first.version!,
             });
         }
         if (group.offer) return;
@@ -410,13 +414,37 @@ export function createCalls(
             remove,
         });
     }
-    // An unresponsive leader is reset and re-admitted like anyone else.
+    // The member who should commit next, preferring anyone who has not
+    // recently failed to answer.
+    function successor(call: Call, except: string) {
+        const group = call.group!;
+        return Array.from(group.entries)
+            .filter(
+                ([id, version]) =>
+                    id !== except && call.seats.get(id)?.version === version
+            )
+            .map(([id]) => call.seats.get(id)!)
+            .sort((a, b) => (a.stalled || 0) - (b.stalled || 0))[0]?.id;
+    }
+    function lead(call: Call, id: string) {
+        call.group!.leader = id;
+        // A new leader may admit someone the last one could not verify yet.
+        for (const seat of call.seats.values()) seat.refused = undefined;
+    }
+    // A slow leader (a frozen tab, a dropped network) keeps its keys and
+    // applies the next commit when it catches up; someone else commits now.
     function stalled(call: Call, n: number) {
         const group = call.group;
         if (calls.get(call.scope) !== call || group?.offer?.n !== n) return;
+        clearTimeout(group.offer.timer);
         group.offer = undefined;
         const leader = call.seats.get(group.leader);
-        if (leader) {
+        if (leader) leader.stalled = Date.now();
+        const next = successor(call, group.leader);
+        if (next) lead(call, next);
+        else if (leader) {
+            // Nobody else holds the keys: start over and re-admit the leader
+            // once it answers.
             leader.version = leader.keyPackage = undefined;
             leader.send({ type: 'mls', scope: call.scope, action: 'reset' });
         }
@@ -443,27 +471,33 @@ export function createCalls(
         const group = call.group;
         const offer = group?.offer;
         const added = packet.added;
-        const reject = () =>
+        const current = Boolean(
+            group && offer && group.leader === id && packet.offer === offer.n
+        );
+        const reject = () => {
             seat.send({
                 type: 'mls',
                 scope: call.scope,
                 action: 'rejected',
                 offer: Number(packet.offer) || 0,
             });
+            // Do not wait out the timer for an answer that cannot be used.
+            if (current) stalled(call, offer!.n);
+        };
         if (
             !group ||
             !offer ||
-            group.leader !== id ||
-            packet.offer !== offer.n ||
+            !current ||
             !Array.isArray(added) ||
             new Set(added).size !== added.length ||
             added.some((v) => !offer.add.some((a) => a.version === v))
         )
             return reject();
         const commit = packet.commit;
+        // No commit means the leader found no one to remove or admit.
         if (
             commit === undefined
-                ? added.length || offer.remove.length || packet.welcome
+                ? added.length || packet.welcome !== undefined
                 : !encoded(commit, 65_536) ||
                   (added.length
                       ? !encoded(packet.welcome, 262_144)
@@ -472,6 +506,7 @@ export function createCalls(
             return reject();
         clearTimeout(offer.timer);
         group.offer = undefined;
+        seat.stalled = undefined;
         for (const a of offer.add) {
             const s = call.seats.get(a.id);
             if (s?.version === a.version && !added.includes(a.version))
@@ -493,7 +528,10 @@ export function createCalls(
                         commit,
                     });
             }
-            for (const member of offer.remove) group.entries.delete(member);
+        }
+        // Before re-adding, so a returning member keeps its new entry.
+        for (const member of offer.remove) group.entries.delete(member);
+        if (commit !== undefined) {
             for (const a of offer.add) {
                 if (!added.includes(a.version)) continue;
                 group.entries.delete(a.id);
@@ -506,6 +544,7 @@ export function createCalls(
                     scope: call.scope,
                     action: 'welcome',
                     welcome: packet.welcome!,
+                    version: a.version,
                 });
             }
             seat.send({

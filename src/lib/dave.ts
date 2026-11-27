@@ -40,9 +40,17 @@ const LABEL = 'Hush Secure Frames v0';
 const ID = /^[A-Za-z0-9_-]{43}$/;
 const enc = new TextEncoder();
 const dec = new TextDecoder('utf-8', { fatal: true });
+// Wait this long to be admitted before asking again.
+const ADMIT_MS = 12_000;
 let suite: Promise<CiphersuiteImpl> | undefined;
+// A failed chunk load must not break every later call on this page.
 const cipherSuite = () =>
-    (suite ||= getCiphersuiteImpl(getCiphersuiteFromName(SUITE)));
+    (suite ||= getCiphersuiteImpl(getCiphersuiteFromName(SUITE)).catch(
+        (error) => {
+            suite = undefined;
+            throw error;
+        }
+    ));
 
 export const attestation = (boot: string, scope: string, key: Uint8Array) =>
     JSON.stringify(['hush-call-v1', boot, scope, b64(key)]);
@@ -98,7 +106,8 @@ type Options = {
     send: (packet: MlsClientPacket) => void;
     // Receives every member's base secret for the new epoch.
     install: (secrets: Map<string, Uint8Array>, delay: number) => void;
-    fail: () => void;
+    // This browser dropped its keys and is asking to be admitted again.
+    reset: () => void;
 };
 const wire = (message: Parameters<typeof encodeMlsMessage>[0]) =>
     b64(encodeMlsMessage(message));
@@ -114,12 +123,15 @@ export class DaveSession {
     private state: ClientState | null = null;
     private pending: { offer: number; state: ClientState } | null = null;
     private keyPackage?: {
+        version: string;
         publicPackage: KeyPackage;
         privatePackage: PrivateKeyPackage;
     };
     private queue = Promise.resolve();
     private closed = false;
     private restarts: number[] = [];
+    private retry?: ReturnType<typeof setTimeout>;
+    private watchdog?: ReturnType<typeof setTimeout>;
     private config: ClientConfig = {
         ...defaultClientConfig,
         authService: {
@@ -134,8 +146,17 @@ export class DaveSession {
     receive(packet: MlsServerPacket) {
         this.enqueue(() => this.handle(packet));
     }
+    // Drops these keys and asks to be admitted again, e.g. when the group
+    // still includes someone who left.
+    resync() {
+        this.enqueue(async () => {
+            throw new Error('Resync.');
+        });
+    }
     close() {
         this.closed = true;
+        clearTimeout(this.retry);
+        clearTimeout(this.watchdog);
         this.state = this.pending = null;
         this.keyPackage = undefined;
     }
@@ -152,8 +173,29 @@ export class DaveSession {
     private enqueue(task: () => Promise<void>) {
         this.queue = this.queue
             .then(() => (this.closed ? undefined : task()))
-            .catch(() => (this.closed ? undefined : this.rejoin()))
-            .catch(() => this.options.fail());
+            .catch(() => this.recover());
+    }
+    // Any commit, welcome, or setup that cannot be applied leads here. This
+    // browser starts over with a fresh key package. Repeated failures back off,
+    // but it keeps trying for as long as the call lasts.
+    private recover() {
+        if (this.closed) return;
+        this.state = this.pending = null;
+        this.keyPackage = undefined;
+        clearTimeout(this.watchdog);
+        clearTimeout(this.retry);
+        this.options.reset();
+        const now = Date.now();
+        this.restarts = this.restarts.filter((time) => now - time < 60_000);
+        const delay = this.restarts.length
+            ? Math.min(8000, 250 * 2 ** (this.restarts.length - 1)) *
+              (0.75 + Math.random() / 2)
+            : 0;
+        this.restarts.push(now);
+        this.retry = setTimeout(() => {
+            this.retry = undefined;
+            this.enqueue(() => this.rejoin());
+        }, delay);
     }
     private async validate(credential: Credential, key: Uint8Array) {
         const owner = credentialId(credential);
@@ -173,10 +215,6 @@ export class DaveSession {
     // A fresh key package asks the server to (re)admit this browser. It is
     // also the recovery path whenever a commit or welcome cannot be applied.
     private async rejoin() {
-        const now = Date.now();
-        this.restarts = this.restarts.filter((time) => now - time < 30_000);
-        if (this.restarts.push(now) > 4)
-            throw new Error('Call encryption keeps failing.');
         this.state = this.pending = null;
         const impl = await cipherSuite();
         const { identity, boot, scope } = this.options;
@@ -185,7 +223,7 @@ export class DaveSession {
             identity,
             attestation(boot, scope, signature.publicKey)
         );
-        this.keyPackage = await generateKeyPackageWithKey(
+        const keyPackage = await generateKeyPackageWithKey(
             {
                 credentialType: 'basic',
                 identity: enc.encode(`${identity.id}.${sig}`),
@@ -197,25 +235,43 @@ export class DaveSession {
             impl
         );
         if (this.closed) return;
+        const version = crypto.randomUUID();
+        this.keyPackage = { version, ...keyPackage };
         this.options.send({
             type: 'mls',
             scope,
             action: 'key-package',
-            version: crypto.randomUUID(),
+            version,
             keyPackage: wire({
                 version: 'mls10',
                 wireformat: 'mls_key_package',
-                keyPackage: this.keyPackage.publicPackage,
+                keyPackage: keyPackage.publicPackage,
             }),
         });
+        // If no one admits this key package, for any reason, ask again.
+        clearTimeout(this.watchdog);
+        this.watchdog = setTimeout(
+            () =>
+                this.enqueue(async () => {
+                    if (this.keyPackage?.version === version)
+                        throw new Error('Not admitted.');
+                }),
+            ADMIT_MS
+        );
     }
     private async handle(packet: MlsServerPacket) {
         if (packet.scope !== this.options.scope) return;
         const impl = await cipherSuite();
-        if (packet.action === 'reset') return this.rejoin();
+        if (packet.action === 'reset') {
+            clearTimeout(this.retry);
+            this.retry = undefined;
+            this.options.reset();
+            return this.rejoin();
+        }
         if (packet.action === 'create' || packet.action === 'welcome') {
             const kp = this.keyPackage;
-            if (!kp) return;
+            // Meant for a key package this browser has since replaced.
+            if (!kp || packet.version !== kp.version) return;
             if (packet.action === 'create')
                 this.state = await createGroup(
                     unb64(packet.group),
@@ -241,9 +297,20 @@ export class DaveSession {
                 );
             }
             this.keyPackage = undefined;
+            clearTimeout(this.watchdog);
             return this.publish(0);
         }
-        if (!this.state) return;
+        if (!this.state) {
+            // Asked to commit while waiting to retry: retry now, so the server
+            // sees this browser is no longer on the current epoch and asks
+            // someone else.
+            if (packet.action === 'sync' && this.retry) {
+                clearTimeout(this.retry);
+                this.retry = undefined;
+                return this.rejoin();
+            }
+            return;
+        }
         if (packet.action === 'commit') {
             const message = read(packet.commit);
             if (

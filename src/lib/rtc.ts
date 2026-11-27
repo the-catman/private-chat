@@ -42,8 +42,9 @@ type Pending = {
 const KINDS: MediaKind[] = ['mic', 'camera', 'screen', 'system'];
 const REQUEST_MS = 10_000;
 // How long someone who left may keep this call's keys before sending pauses.
-// The leader normally removes them within a second or two.
-const LINGER_MS = 5_000;
+// The leader normally removes them within a second or two; a leader that does
+// not answer is replaced after five seconds (server/calls.ts LEADER_MS).
+const LINGER_MS = 8_000;
 const UNREACHABLE =
     'Could not reach the call server. Check your connection, or ask whoever runs Hush to open its media port.';
 export class CallEngine {
@@ -88,6 +89,8 @@ export class CallEngine {
     private keySet = 0;
     private keyed = new Set<string>();
     private keyedSet = 0;
+    // Whether this browser holds the call's current keys.
+    private secure = false;
     private held = false;
     private holdTimer?: ReturnType<typeof setTimeout>;
     private installing: Promise<void> = Promise.resolve();
@@ -287,10 +290,12 @@ export class CallEngine {
                 ),
             send: (packet) => this.wire(packet),
             install: (secrets, delay) => this.install(secrets, delay),
-            fail: () =>
-                this.notify(
-                    'Call encryption could not be set up. Leave the call and join again.'
-                ),
+            // Shown as connecting until new keys arrive; it retries by itself.
+            reset: () => {
+                if (operation !== this.operation) return;
+                this.secure = false;
+                this.emit();
+            },
         });
         this.dave.start();
         for (const kind of KINDS) await this.produce(kind);
@@ -387,13 +392,15 @@ export class CallEngine {
                 } satisfies WorkerMessage);
                 this.keyed = new Set(secrets.keys());
                 this.keyedSet = set;
+                this.secure = true;
                 this.checkRoster();
                 this.emit();
             })
             .catch(() => {});
     }
-    // Stops sending media while the call keys include someone who left. The
-    // server might never remove them, so this does not wait for it forever.
+    // Stops sending media while the call keys include someone who left, and
+    // asks to be admitted again in case this browser missed their removal.
+    // The server might never remove them, so this does not wait for it.
     private checkRoster() {
         const stale = () =>
             this.lingering?.(this.keyed, this.members, this.id, this.scope!)
@@ -421,9 +428,8 @@ export class CallEngine {
                 type: 'hold',
                 from: Infinity,
             } satisfies WorkerMessage);
-            this.notify(
-                'Your audio and video are paused: someone who left this call can still decrypt it. Leave and join again if this lasts.'
-            );
+            this.emit();
+            this.dave?.resync();
         }, LINGER_MS);
     }
     private async derive({ set, member, generation }: WorkerRequest) {
@@ -852,6 +858,7 @@ export class CallEngine {
         this.bases.clear();
         this.keyed = new Set();
         this.keyedSet = 0;
+        this.secure = false;
         this.held = false;
         clearTimeout(this.holdTimer);
         this.holdTimer = undefined;
