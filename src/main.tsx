@@ -206,6 +206,10 @@ function dayLabel(time: number) {
     });
 }
 
+// Previews open as dialogs inside their message; events there are theirs.
+const inDialog = (event: React.SyntheticEvent) =>
+    Boolean((event.target as HTMLElement).closest('dialog'));
+
 // Messages from one person within a few minutes share a single header.
 const GROUP_MS = 5 * 60_000;
 
@@ -242,7 +246,7 @@ function ChatMessage({
             data-message-id={message.id}
             tabIndex={0}
             onContextMenu={(event) => {
-                if (editing) return;
+                if (editing || inDialog(event)) return;
                 if (event.ctrlKey && !event.altKey && !event.metaKey) {
                     if (
                         (event.target as HTMLElement).closest(
@@ -266,6 +270,7 @@ function ChatMessage({
             onKeyDown={(event) => {
                 if (
                     !editing &&
+                    !inDialog(event) &&
                     (event.key === 'ContextMenu' ||
                         (event.shiftKey && event.key === 'F10'))
                 ) {
@@ -282,6 +287,7 @@ function ChatMessage({
             onClick={(event) => {
                 if (
                     editing ||
+                    inDialog(event) ||
                     (event.target as HTMLElement).closest(
                         'button, input, a, audio, textarea, select, [contenteditable]'
                     )
@@ -1250,6 +1256,17 @@ function ModalView({
                                 </p>
                             </div>
                         </div>
+                        <div className="privacy-row">
+                            <Icon name="globe" />
+                            <div>
+                                <strong>Image links</strong>
+                                <p>
+                                    The server fetches images from links, so the
+                                    sites hosting them don’t see your IP
+                                    address. The server does see those links.
+                                </p>
+                            </div>
+                        </div>
                         <div className="privacy-note">
                             The server sees display names and connection
                             details. To be sure who you are talking to, compare
@@ -1429,6 +1446,19 @@ function App() {
             return next.length === ids.length ? ids : next;
         });
     }, [state.messages]);
+    // Images and previews change height after they load; stay at the end.
+    const connected =
+        state.phase === 'online' || state.phase === 'reconnecting';
+    useEffect(() => {
+        const el = scroll.current;
+        const content = el?.querySelector('.messages');
+        if (!el || !content) return;
+        const observer = new ResizeObserver(() => {
+            if (nearBottom.current) el.scrollTop = el.scrollHeight;
+        });
+        observer.observe(content);
+        return () => observer.disconnect();
+    }, [connected]);
     useEffect(() => {
         const el = scroll.current;
         if (!el) return;

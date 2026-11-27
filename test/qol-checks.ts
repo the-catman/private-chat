@@ -463,10 +463,15 @@ export async function checkMarkdown(alice: Page, bob: Page) {
         .getByTestId('chat-message')
         .filter({ hasText: 'Safe rendering:' });
     await expect(safe).toBeVisible();
+    // The image's host does not exist, so the proxy fails and its
+    // description shows instead. The browser never contacts that host.
+    await expect(safe.locator('.markdown-image-label')).toHaveText(
+        'remote image'
+    );
     await expect(safe.locator('a, img, script, iframe')).toHaveCount(0);
     await alice.screenshot({ path: 'test-results/markdown-chat.png' });
     console.log(
-        'PASS: Markdown formatting, editable source, safe links, no remote images or HTML and selectable message content'
+        'PASS: Markdown formatting, editable source, safe links, no direct remote images or HTML and selectable message content'
     );
 }
 

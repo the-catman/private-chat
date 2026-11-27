@@ -1,3 +1,5 @@
+import { imageType } from './image-type';
+
 // Preview only a small set of formats. MIME labels and extensions alone do not
 // make an attachment safe to embed; HTML and SVG are always download-only.
 export type AttachmentPreview =
@@ -47,16 +49,10 @@ export function attachmentPreview(
         return type === 'text/plain' || textExtensions.has(extension)
             ? { kind: 'text' }
             : null;
-    const starts = (...signature: number[]) =>
-        signature.every((byte, i) => bytes[i] === byte);
-    if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a))
-        return { kind: 'image', mime: 'image/png' };
-    if (starts(0xff, 0xd8, 0xff)) return { kind: 'image', mime: 'image/jpeg' };
-    const header = new TextDecoder().decode(bytes.subarray(0, 12));
-    if (/^GIF8[79]a/.test(header)) return { kind: 'image', mime: 'image/gif' };
-    if (header.startsWith('RIFF') && header.slice(8) === 'WEBP')
-        return { kind: 'image', mime: 'image/webp' };
-    if (header.startsWith('%PDF-')) return { kind: 'pdf' };
+    const image = imageType(bytes);
+    if (image) return { kind: 'image', mime: image };
+    if (new TextDecoder().decode(bytes.subarray(0, 5)) === '%PDF-')
+        return { kind: 'pdf' };
     if (type === 'text/plain' || textExtensions.has(extension))
         return { kind: 'text' };
     return null;

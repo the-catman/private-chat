@@ -16,6 +16,10 @@ const PdfPreview = lazy(() =>
 );
 type FileContent = Extract<Message['payload'], { kind: 'file' }>;
 
+// A data URL keeps the decoded image in page memory, never in blob storage.
+const imageSource = (mime: string, bytes: Uint8Array) =>
+    `data:${mime};base64,${b64(bytes).replaceAll('-', '+').replaceAll('_', '/')}`;
+
 // Build the download Blob only when asked, so large files are not copied
 // into browser blob storage just by appearing in the conversation.
 function useDownload(bytes: Uint8Array<ArrayBuffer> | undefined, name: string) {
@@ -66,7 +70,15 @@ export function FileAttachment({
             bytes ? attachmentPreview(content.name, content.mime, bytes) : null,
         [content.name, content.mime, bytes]
     );
+    const image = useMemo(
+        () =>
+            bytes && preview?.kind === 'image'
+                ? imageSource(preview.mime, bytes)
+                : '',
+        [bytes, preview]
+    );
     const [open, setOpen] = useState(false);
+    const [broken, setBroken] = useState(false);
     const [wanted, setWanted] = useState(false);
     const downloadName = content.name.replace(/[\\/\u0000-\u001f\u007f]/g, '_');
     const { click: download, save } = useDownload(bytes, downloadName);
@@ -97,6 +109,54 @@ export function FileAttachment({
             </span>
         </>
     );
+    const viewer = open && preview && bytes && (
+        <FilePreview
+            content={content}
+            bytes={bytes}
+            preview={preview}
+            image={image}
+            download={download}
+            downloadName={downloadName}
+            close={() => setOpen(false)}
+        />
+    );
+    if (image && !broken)
+        return (
+            <>
+                <div className="image-attachment">
+                    <button
+                        className="image-thumb"
+                        aria-label={`Preview ${content.name}`}
+                        title={`${content.name} · ${fileSize(content.size)}`}
+                        onClick={() => setOpen(true)}
+                    >
+                        <img
+                            src={image}
+                            alt={content.name}
+                            draggable={false}
+                            onError={() => setBroken(true)}
+                        />
+                    </button>
+                    {progress !== undefined && (
+                        <small className="image-status">
+                            {sending ? 'Sending' : 'Receiving'}{' '}
+                            {Math.floor(progress * 100)}%
+                        </small>
+                    )}
+                    <a
+                        className="icon-button file-download"
+                        href="#"
+                        onClick={download}
+                        download={downloadName}
+                        aria-label={`Download ${content.name}`}
+                        title="Download file"
+                    >
+                        <Icon name="download" size={19} />
+                    </a>
+                </div>
+                {viewer}
+            </>
+        );
     return (
         <>
             <div className="file-attachment">
@@ -149,16 +209,7 @@ export function FileAttachment({
                     </a>
                 )}
             </div>
-            {open && preview && bytes && (
-                <FilePreview
-                    content={content}
-                    bytes={bytes}
-                    preview={preview}
-                    download={download}
-                    downloadName={downloadName}
-                    close={() => setOpen(false)}
-                />
-            )}
+            {viewer}
         </>
     );
 }
@@ -167,6 +218,7 @@ function FilePreview({
     content,
     bytes,
     preview,
+    image,
     download,
     downloadName,
     close,
@@ -174,6 +226,7 @@ function FilePreview({
     content: FileContent;
     bytes: Uint8Array<ArrayBuffer>;
     preview: AttachmentPreview;
+    image: string;
     download: (event: React.MouseEvent<HTMLAnchorElement>) => void;
     downloadName: string;
     close: () => void;
@@ -189,13 +242,6 @@ function FilePreview({
             return null;
         }
     }, [bytes, preview.kind]);
-    const image = useMemo(
-        () =>
-            preview.kind === 'image'
-                ? `data:${preview.mime};base64,${b64(bytes).replaceAll('-', '+').replaceAll('_', '/')}`
-                : '',
-        [bytes, preview]
-    );
     useEffect(() => {
         dialog.current?.showModal();
     }, []);

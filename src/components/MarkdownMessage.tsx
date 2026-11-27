@@ -1,54 +1,70 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Icon } from '../Icon';
 import { useMobilePanel } from './useMobilePanel';
 import { SheetHandle } from './SheetHandle';
+import { messageImages, RemoteImage } from './RemoteImage';
 
 const plugins = [remarkGfm];
-// No raw HTML, remote images, or executable URLs. Rendering never fetches content.
+// No raw HTML or executable URLs. Images from links load only through the
+// server's image proxy, never directly from another site.
 export const MarkdownMessage = memo(function MarkdownMessage({
     text,
 }: {
     text: string;
 }) {
+    const images = useMemo(() => messageImages(text), [text]);
     return (
-        <div className="message-text markdown">
-            <Markdown
-                remarkPlugins={plugins}
-                skipHtml
-                urlTransform={(url) =>
-                    /^(https?:\/\/|mailto:)/i.test(url) ? url : ''
-                }
-                components={{
-                    a: ({ href, children }) =>
-                        href ? (
-                            <a
-                                href={href}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                referrerPolicy="no-referrer"
-                            >
-                                {children}
-                            </a>
-                        ) : (
-                            <span>{children}</span>
+        <>
+            <div className="message-text markdown">
+                <Markdown
+                    remarkPlugins={plugins}
+                    skipHtml
+                    urlTransform={(url) =>
+                        /^(https?:\/\/|mailto:)/i.test(url) ? url : ''
+                    }
+                    components={{
+                        a: ({ href, children }) =>
+                            href ? (
+                                <a
+                                    href={href}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    referrerPolicy="no-referrer"
+                                >
+                                    {children}
+                                </a>
+                            ) : (
+                                <span>{children}</span>
+                            ),
+                        img: ({ src, alt }) =>
+                            typeof src === 'string' &&
+                            images.inline.has(src) ? (
+                                <RemoteImage url={src} alt={alt} inline />
+                            ) : (
+                                <span className="markdown-image-label">
+                                    {alt || 'Image'}
+                                </span>
+                            ),
+                        table: ({ children }) => (
+                            <div className="markdown-table">
+                                <table>{children}</table>
+                            </div>
                         ),
-                    img: ({ alt }) => (
-                        <span className="markdown-image-label">
-                            {alt || 'Image'}
-                        </span>
-                    ),
-                    table: ({ children }) => (
-                        <div className="markdown-table">
-                            <table>{children}</table>
-                        </div>
-                    ),
-                }}
-            >
-                {text}
-            </Markdown>
-        </div>
+                    }}
+                >
+                    {text}
+                </Markdown>
+            </div>
+            {images.links.length > 0 && (
+                <div className="message-embeds">
+                    {images.links.map((url) => (
+                        <RemoteImage key={url} url={url} />
+                    ))}
+                </div>
+            )}
+        </>
     );
 });
 

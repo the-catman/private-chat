@@ -14,6 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isIPv6 } from 'node:net';
 import type { Config } from './config';
 import { CallError, createCalls } from './calls.ts';
+import { createImageProxy, ImageError, type Resolve } from './images.ts';
 import type { Frontend } from './frontend';
 import type {
     Bundle,
@@ -149,7 +150,8 @@ export function createChatServer(
     {
         dist = resolve('dist'),
         frontend,
-    }: { dist?: string; frontend?: Frontend } = {}
+        resolveImage,
+    }: { dist?: string; frontend?: Frontend; resolveImage?: Resolve } = {}
 ) {
     // Only ciphertext is retained here. No message, session, or signaling file writes.
     const boot = randomUUID();
@@ -170,6 +172,18 @@ export function createChatServer(
     const passwordHash = hash(config.password);
     const sockets = new Set<ClientSocket>();
     const calls = createCalls(config);
+    const images = createImageProxy({ resolve: resolveImage });
+    const imageRequests = new Map<string, { start: number; count: number }>();
+    // Enough for scrolling through a busy conversation, not for crawling.
+    function imageLimited(token: string) {
+        const now = Date.now();
+        let bucket = imageRequests.get(token);
+        if (!bucket || now - bucket.start > 60_000) {
+            bucket = { start: now, count: 0 };
+            imageRequests.set(token, bucket);
+        }
+        return ++bucket.count > 300;
+    }
     const wss = new WebSocketServer({
         noServer: true,
         maxPayload: MAX_PACKET,
@@ -381,6 +395,37 @@ export function createChatServer(
                     `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`
                 );
                 return json(res, 200, { ok: true });
+            }
+            if (req.url.startsWith('/api/image?') && req.method === 'GET') {
+                const auth = session(req);
+                if (!auth)
+                    return json(res, 401, { error: 'Enter the password.' });
+                const site = req.headers['sec-fetch-site'];
+                if (site && site !== 'same-origin' && site !== 'none')
+                    return json(res, 403, { error: 'Origin not allowed.' });
+                if (imageLimited(auth.token)) {
+                    res.setHeader('Retry-After', '60');
+                    return json(res, 429, { error: 'Too many images.' });
+                }
+                try {
+                    const image = await images.get(
+                        new URL(req.url, config.origin).searchParams.get('url')
+                    );
+                    res.writeHead(200, {
+                        'Content-Type': image.mime,
+                        'Content-Length': image.bytes.length,
+                        'Content-Security-Policy':
+                            "default-src 'none'; sandbox",
+                        'Cross-Origin-Resource-Policy': 'same-origin',
+                    });
+                    return res.end(image.bytes);
+                } catch (error) {
+                    return json(
+                        res,
+                        error instanceof ImageError ? error.status : 502,
+                        { error: 'Image unavailable.' }
+                    );
+                }
             }
             if (
                 !['GET', 'HEAD'].includes(req.method) ||
@@ -1250,6 +1295,8 @@ export function createChatServer(
             if (auth.expires <= now) sessions.delete(token);
         for (const [ip, value] of attempts)
             if (now - value.start > 60_000) attempts.delete(ip);
+        for (const [token, value] of imageRequests)
+            if (now - value.start > 60_000) imageRequests.delete(token);
         for (const ws of sockets) {
             if (!sessions.has(ws.auth.token)) {
                 ws.close(4001, 'Session expired. Please sign in again.');
@@ -1289,6 +1336,8 @@ export function createChatServer(
             sessions.clear();
             members.clear();
             attempts.clear();
+            imageRequests.clear();
+            images.clear();
             passwordHash.fill(0);
             await new Promise<void>((resolve) => wss.close(() => resolve()));
             await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -8,6 +8,7 @@ import {
     type BrowserContextOptions,
 } from '@playwright/test';
 import { createServer } from 'node:https';
+import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import {
     mkdtemp,
@@ -31,7 +32,12 @@ import { observeSpeaking, checkSpeaking } from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
 import { checkMobileLayout } from './mobile-checks';
 import { checkUiChanges, checkPanelGestures } from './ui-checks';
-import { checkLargeFiles, checkDmImage } from './file-checks';
+import {
+    checkLargeFiles,
+    checkDmImage,
+    checkImageLinks,
+    imageHostPng,
+} from './file-checks';
 import {
     checkParticipantVolume,
     checkMarkdown,
@@ -120,9 +126,22 @@ if (devRoot && !actualProject) {
         'dir'
     );
 }
+// A stand-in public image host, reached as images.test through the proxy.
+const imageHost = createHttpServer((req, res) => {
+    if (req.url !== '/cat.png') return res.writeHead(404).end();
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(imageHostPng);
+});
+imageHost.listen(0, '127.0.0.1');
+await once(imageHost, 'listening');
+const imageBase = `http://images.test:${(imageHost.address() as AddressInfo).port}`;
 app = createChatServer(config, {
     dist: resolve(process.env.TEST_DIST || 'dist'),
     frontend: devRoot ? await createDevFrontend(config, devRoot) : undefined,
+    resolveImage: async (host) => {
+        if (host !== 'images.test') throw new Error('Not a test host');
+        return { address: '127.0.0.1', family: 4 };
+    },
 });
 
 const browserType = process.env.TEST_BROWSER === 'webkit' ? webkit : chromium;
@@ -178,6 +197,12 @@ async function participant(name: string, options: BrowserContextOptions = {}) {
     });
     const page = await context.newPage();
     page.on('pageerror', (error) => errors.push(error.message));
+    // The page itself never contacts another site; images come via the proxy.
+    page.on('request', (request) => {
+        const url = new URL(request.url());
+        if (/^https?:$/.test(url.protocol) && url.host !== config.host)
+            errors.push(`Direct request to ${url.origin}`);
+    });
     page.on('response', (response) => {
         if (
             response.status() >= 400 &&
@@ -381,6 +406,7 @@ async function run() {
     if (process.env.TEST_FILES === '1') {
         await checkLargeFiles(alice.page, bob.page, dir);
         await checkDmImage(alice.page, bob.page);
+        await checkImageLinks(alice.page, bob.page, imageBase);
         assert.deepEqual(errors, []);
         console.log(
             'PASS: large files, on-demand download, reload and DM images'
@@ -1198,6 +1224,7 @@ async function run() {
     );
 
     await checkMarkdown(alice.page, bob.page);
+    await checkImageLinks(alice.page, bob.page, imageBase);
     await checkClearChat(alice, bob, dave);
     await checkComposerFocus(alice.page);
 
@@ -1298,5 +1325,6 @@ try {
     await browser.close();
     await app.close();
     await new Promise<void>((resolve) => ingress.close(() => resolve()));
+    await new Promise<void>((resolve) => imageHost.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
 }
