@@ -36,7 +36,7 @@ export function AudioSettingsFields({
                             })
                         }
                     />
-                    Soft sounds for messages and calls
+                    Message and call sounds
                 </label>
                 <div className="sound-volume">
                     <label>
@@ -81,7 +81,7 @@ export function AudioSettingsFields({
                         }
                     >
                         <option value="browser">Browser</option>
-                        <option value="enhanced">Enhanced · local AI</option>
+                        <option value="enhanced">Enhanced (on device)</option>
                         <option value="off">Off</option>
                     </select>
                 </label>

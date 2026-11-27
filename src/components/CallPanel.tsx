@@ -50,7 +50,7 @@ export function CallPanel({
     const popout = useRef<Popout | null>(null);
     const drag = useRef<{ y: number; height: number } | null>(null);
     const visibleHeight = Math.max(bounds.min, Math.min(bounds.max, height));
-    const title = call.scope === 'room' ? 'The lounge' : 'Private call';
+    const title = call.scope === 'room' ? 'voice' : 'Private call';
     const captureDevices = () =>
         panel.current?.ownerDocument.defaultView?.navigator.mediaDevices;
 
@@ -431,8 +431,7 @@ export function CallPanel({
                     {people.length === 1 && (
                         <div className="video-tile waiting-tile">
                             <Icon name="headphones" size={28} />
-                            <span>Room for your people</span>
-                            <small>They can join whenever they’re ready.</small>
+                            <span>Waiting for others</span>
                         </div>
                     )}
                 </div>
@@ -588,8 +587,8 @@ export function CallPanel({
                     <div className="call-away">
                         <Icon name="popout" />
                         <span>
-                            <strong>Your call is in another window</strong>
-                            <small>Keep this tab open during your call.</small>
+                            <strong>Call is in another window</strong>
+                            <small>Keep this tab open.</small>
                         </span>
                         <button
                             className="subtle-button"

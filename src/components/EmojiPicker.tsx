@@ -107,7 +107,7 @@ export function EmojiPicker({
                 <Icon name="search" size={18} />
                 <input
                     aria-label="Search emojis"
-                    placeholder="Find an emoji…"
+                    placeholder="Search emoji"
                     value={search}
                     autoFocus
                     onChange={(event) => {
@@ -263,7 +263,7 @@ export function EmojiPicker({
             </div>
             {matches.length === 0 && (
                 <p className="emoji-empty" role="status">
-                    No emojis found. Try another name.
+                    No emoji found.
                 </p>
             )}
             <small className="emoji-picker-hint">

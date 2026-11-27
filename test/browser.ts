@@ -37,6 +37,7 @@ import {
     checkMarkdown,
     checkClearChat,
     checkComposerFocus,
+    checkMessageLayout,
 } from './qol-checks';
 import {
     observeAudio,
@@ -144,6 +145,7 @@ async function participant(name: string, options: BrowserContextOptions = {}) {
         ignoreHTTPSErrors: true,
         permissions: browserType === chromium ? ['microphone', 'camera'] : [],
         viewport: { width: 1440, height: 950 },
+        colorScheme: 'dark',
         ...options,
     });
     await observeAudio(context);
@@ -195,13 +197,11 @@ async function participant(name: string, options: BrowserContextOptions = {}) {
             errors.push(event.text());
     });
     await page.goto(config.origin);
-    await page.getByLabel('What should we call you?').fill(name);
-    await page.getByLabel('Room password').fill(password);
-    await page
-        .getByRole('button', { name: 'Enter your space', exact: true })
-        .click();
+    await page.getByLabel('Name', { exact: true }).fill(name);
+    await page.getByLabel('Password', { exact: true }).fill(password);
+    await page.getByRole('button', { name: 'Log in', exact: true }).click();
     await expect(
-        page.getByRole('heading', { name: 'The living room', exact: true })
+        page.getByRole('heading', { name: 'general', exact: true })
     ).toBeVisible();
     return { context, page };
 }
@@ -249,7 +249,7 @@ async function checkVoiceNote(alice: Person, bob: Person) {
 async function checkCalls(alice: Person, bob: Person, charlie: Person) {
     for (const p of [alice, bob, charlie])
         await p.page
-            .getByRole('button', { name: 'The living room', exact: true })
+            .getByRole('button', { name: 'general', exact: true })
             .click();
     await bob.page.evaluate(() => {
         window.__testSyntheticMic = true;
@@ -402,11 +402,12 @@ async function run() {
     }
     if (process.env.TEST_SHORTCUTS === '1') {
         await checkMessageShortcuts(alice.page, bob.page);
+        await checkMessageLayout(alice.page, bob.page);
         assert.deepEqual(errors, []);
         return;
     }
     await expect(alice.page.locator('.space-heading')).toContainText(
-        '3 of 4 here'
+        '3 online'
     );
     await message(alice.page, 'A hello for everyone in this room.');
     await expect(
@@ -441,8 +442,8 @@ async function run() {
             await writeFile(
                 mainPath,
                 (await readFile(mainPath, 'utf8')).replace(
-                    'YOUR SPACE',
-                    'Frontend refresh test'
+                    'section-caption">Channels<',
+                    'section-caption">Frontend refresh test<'
                 )
             );
             await expect(
@@ -656,7 +657,7 @@ async function run() {
     await bob.page.getByRole('button', { name: 'Done', exact: true }).click();
     await bob.page.reload();
     await expect(
-        bob.page.getByRole('heading', { name: 'The living room', exact: true })
+        bob.page.getByRole('heading', { name: 'general', exact: true })
     ).toBeVisible();
     await bob.page.locator('.dm-row').filter({ hasText: 'Alice' }).click();
     await expect(
@@ -827,9 +828,7 @@ async function run() {
     await alice.page
         .getByRole('textbox', { name: 'Search messages', exact: true })
         .fill('no such message exists');
-    await expect(
-        alice.page.getByText('No messages match your search.')
-    ).toBeVisible();
+    await expect(alice.page.getByText('No results.')).toBeVisible();
     await alice.page
         .getByRole('textbox', { name: 'Search messages', exact: true })
         .press('Escape');
@@ -841,12 +840,12 @@ async function run() {
         .getByRole('button', { name: 'Privacy & encryption', exact: true })
         .click();
     await expect(
-        alice.page.getByRole('heading', { name: 'Private by design.' })
+        alice.page.getByRole('heading', { name: 'Privacy & encryption' })
     ).toBeVisible();
     await alice.page.keyboard.press('Escape');
     await expect(
         alice.page.getByRole('dialog', {
-            name: 'Make yourself comfortable.',
+            name: 'Settings',
             exact: true,
         })
     ).toBeVisible();
@@ -947,9 +946,7 @@ async function run() {
 
     const dave = await participant('Dave');
     await expect(
-        alice.page
-            .locator('.presence-event')
-            .filter({ hasText: 'Dave joined the room' })
+        alice.page.locator('.presence-event').filter({ hasText: 'Dave joined' })
     ).toBeVisible();
     await expect(dave.page.getByTestId('chat-message')).toHaveCount(0);
     await alice.page
@@ -1055,7 +1052,7 @@ async function run() {
     ).toHaveCount(0);
     await dave.page.reload();
     await expect(
-        dave.page.getByRole('heading', { name: 'The living room', exact: true })
+        dave.page.getByRole('heading', { name: 'general', exact: true })
     ).toBeVisible();
     await expect(dave.page.getByTestId('chat-message')).toHaveCount(0);
     console.log(
@@ -1069,9 +1066,26 @@ async function run() {
         await chatText.evaluate((node) => getComputedStyle(node).fontSize),
         '16px'
     );
+    // Until someone picks a theme, it follows the system setting live.
+    await alice.page.emulateMedia({ colorScheme: 'light' });
+    await expect(alice.page.locator('html')).toHaveAttribute(
+        'data-theme',
+        'light'
+    );
+    await alice.page.emulateMedia({ colorScheme: 'dark' });
+    await expect(alice.page.locator('html')).toHaveAttribute(
+        'data-theme',
+        'dark'
+    );
     await alice.page
         .getByRole('button', { name: 'Switch to light mode', exact: true })
         .click();
+    await expect(alice.page.locator('html')).toHaveAttribute(
+        'data-theme',
+        'light'
+    );
+    // An explicit choice no longer follows the system.
+    await alice.page.emulateMedia({ colorScheme: 'dark' });
     await expect(alice.page.locator('html')).toHaveAttribute(
         'data-theme',
         'light'
@@ -1188,6 +1202,7 @@ async function run() {
     await checkComposerFocus(alice.page);
 
     await checkMessageShortcuts(alice.page, bob.page);
+    await checkMessageLayout(alice.page, bob.page);
 
     await checkUiChanges(alice.page, bob.page);
     await checkMobileLayout(alice.page, bob.page);
@@ -1215,10 +1230,10 @@ async function run() {
         .getByRole('button', { name: 'Open navigation', exact: true })
         .click();
     await alice.page
-        .getByRole('button', { name: 'Leave this space', exact: true })
+        .getByRole('button', { name: 'Log out', exact: true })
         .click();
     const logout = alice.page.getByRole('dialog', {
-        name: 'Log out of this space?',
+        name: 'Log out?',
         exact: true,
     });
     await expect(logout).toBeVisible();
@@ -1231,17 +1246,17 @@ async function run() {
         alice.page.getByRole('heading', { name: 'Bob', exact: true })
     ).toBeVisible();
     await alice.page
-        .getByRole('button', { name: 'Leave this space', exact: true })
+        .getByRole('button', { name: 'Log out', exact: true })
         .click();
     await alice.page.keyboard.press('Escape');
     await expect(logout).toHaveCount(0);
     await alice.page
-        .getByRole('button', { name: 'Leave this space', exact: true })
+        .getByRole('button', { name: 'Log out', exact: true })
         .click();
     await logout.getByRole('button', { name: 'Log out', exact: true }).click();
     await expect(
         alice.page.getByRole('button', {
-            name: 'Enter your space',
+            name: 'Log in',
             exact: true,
         })
     ).toBeVisible();

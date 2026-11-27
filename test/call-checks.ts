@@ -68,7 +68,7 @@ export async function checkAudioPreferences(page: Page) {
     await expect
         .poll(() => page.evaluate(() => window.__testToneStarts))
         .toBeGreaterThan(before);
-    const sounds = page.getByLabel('Soft sounds for messages and calls');
+    const sounds = page.getByLabel('Message and call sounds');
     await sounds.uncheck();
     await expect(
         page.getByRole('button', { name: 'Preview', exact: true })
@@ -409,7 +409,7 @@ export async function checkScreenAudioAndPopout(alice: Page, bob: Page) {
         'false'
     );
     await expect(
-        alice.getByText('Your call is in another window', { exact: true })
+        alice.getByText('Call is in another window', { exact: true })
     ).toBeVisible();
     await fitsPanel(popup);
     await (await import('./qol-checks')).checkPopoutVolume(popup, alice);

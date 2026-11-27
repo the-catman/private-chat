@@ -124,6 +124,7 @@ const paths: Record<string, React.ReactNode> = {
         </>
     ),
     arrow: <path d="M4 12h16m-6-6 6 6-6 6" />,
+    arrowDown: <path d="M12 4v16m-6-6 6 6 6-6" />,
     chevron: <path d="m8 5 7 7-7 7" />,
     copy: (
         <>

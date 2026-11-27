@@ -11,14 +11,14 @@ async function send(page: Page, text: string, displayed = text) {
     await page.keyboard.press('Enter');
     await expect(
         row(page, displayed).locator('.message-delivery')
-    ).toHaveAttribute('title', 'Received by the server, encrypted');
+    ).toHaveAttribute('title', 'Sent');
 }
 
 export async function checkMessageShortcuts(alice: Page, bob: Page) {
     for (const page of [alice, bob])
         await page
             .locator('.channel-row')
-            .filter({ hasText: 'The living room' })
+            .filter({ hasText: 'general' })
             .click();
     const composer = alice.locator('.composer [role="textbox"]');
     const editor = alice.getByRole('textbox', {
@@ -178,15 +178,17 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
     });
     await expect(file.locator('.message-delivery')).toHaveAttribute(
         'title',
-        'Received by the server, encrypted'
+        'Sent'
     );
-    await file
-        .locator('.author-name')
-        .click({ button: 'right', modifiers: ['Control'] });
+    // Grouped under the previous message, so click its time gutter.
+    const gutter = { x: 24, y: 12 };
+    await file.click({
+        button: 'right',
+        modifiers: ['Control'],
+        position: gutter,
+    });
     await expect(editor).toHaveCount(0);
-    await file
-        .locator('.author-name')
-        .click({ modifiers: ['Control', 'Shift'] });
+    await file.click({ modifiers: ['Control', 'Shift'], position: gutter });
     for (const page of [alice, bob])
         await expect(
             page.getByRole('link', {
@@ -210,7 +212,7 @@ export async function checkMessageShortcuts(alice: Page, bob: Page) {
         await expect(row(page, 'A private shortcut edit.')).toHaveCount(0);
         await page
             .locator('.channel-row')
-            .filter({ hasText: 'The living room' })
+            .filter({ hasText: 'general' })
             .click();
         await expect(
             row(page, 'Bob owns this shortcut message.')

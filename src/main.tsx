@@ -58,144 +58,60 @@ function Login({ state }: { state: ChatState }) {
     return (
         <main className="login-page">
             <div className="login-top">
-                <a className="wordmark" href="/" aria-label="Hush home">
-                    <span className="brand-icon">
-                        <Icon name="wave" size={24} />
-                    </span>
-                    hush<span className="wordmark-dot">.</span>
-                </a>
-                <span className="quiet-label">
-                    <Icon name="lock" size={14} /> A private place to connect
-                </span>
                 <AppearanceControls />
             </div>
-            <div className="login-layout">
-                <section className="login-story">
-                    <div className="eyebrow">
-                        <span className="pulse-dot" /> SMALL CIRCLE. GOOD
-                        COMPANY.
-                    </div>
-                    <h1>
-                        A little space.
-                        <br />
-                        <em>Just your people.</em>
-                    </h1>
-                    <p>
-                        Drop a thought. Share your screen. Stay on a call a
-                        little longer. Make yourself at home.
-                    </p>
-                    <div className="orbit-art" aria-hidden="true">
-                        <div className="orbit-ring one" />
-                        <div className="orbit-ring two" />
-                        <div className="orbit-center">
-                            <Icon name="wave" size={62} />
+            <section className="login-card">
+                <h1>Hush</h1>
+                <form
+                    onSubmit={(event) => {
+                        event.preventDefault();
+                        void client.login(name, password);
+                        setPassword('');
+                    }}
+                >
+                    <label htmlFor="display-name">Name</label>
+                    <input
+                        id="display-name"
+                        name="name"
+                        autoComplete="nickname"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        minLength={1}
+                        maxLength={32}
+                        required
+                        disabled={joining}
+                        autoFocus
+                    />
+                    <label htmlFor="room-password">Password</label>
+                    <input
+                        id="room-password"
+                        name="password"
+                        type="password"
+                        autoComplete="current-password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                        disabled={joining}
+                    />
+                    {state.error && (
+                        <div className="form-error" role="alert">
+                            {state.error}
                         </div>
-                        <div className="orbit-bubble bubble-one">
-                            <Icon name="video" size={28} />
-                        </div>
-                        <div className="orbit-bubble bubble-two">
-                            <Icon name="mic" size={25} />
-                        </div>
-                        <div className="orbit-bubble bubble-three">
-                            <Icon name="shield" size={24} />
-                        </div>
-                        <span className="orbit-caption">
-                            <i /> always between us
-                        </span>
-                    </div>
-                    <div className="login-promises">
-                        <span>
-                            <Icon name="shield" size={16} /> End-to-end
-                            encrypted
-                        </span>
-                        <span>
-                            <Icon name="clock" size={16} /> No message files.
-                            Ever.
-                        </span>
-                    </div>
-                </section>
-                <section className="login-card">
-                    <div className="login-card-icon">
-                        <Icon name="wave" size={27} />
-                    </div>
-                    <h2>Come on in.</h2>
-                    <p>Your people are one hello away.</p>
-                    <form
-                        onSubmit={(event) => {
-                            event.preventDefault();
-                            void client.login(name, password);
-                            setPassword('');
-                        }}
+                    )}
+                    <button
+                        className="primary login-submit"
+                        disabled={joining || !name.trim()}
                     >
-                        <label htmlFor="display-name">
-                            What should we call you?
-                        </label>
-                        <input
-                            id="display-name"
-                            name="name"
-                            autoComplete="nickname"
-                            placeholder="Your display name"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                            minLength={1}
-                            maxLength={32}
-                            required
-                            disabled={joining}
-                            autoFocus
-                        />
-                        <label htmlFor="room-password">
-                            Room password <Icon name="lock" size={13} />
-                        </label>
-                        <input
-                            id="room-password"
-                            name="password"
-                            type="password"
-                            autoComplete="current-password"
-                            placeholder="The one shared with your circle"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            required
-                            disabled={joining}
-                        />
-                        {state.error && (
-                            <div className="form-error" role="alert">
-                                {state.error}
-                            </div>
+                        {joining ? (
+                            <>
+                                <span className="spinner" /> Logging in…
+                            </>
+                        ) : (
+                            'Log in'
                         )}
-                        <button
-                            className="primary login-submit"
-                            disabled={joining || !name.trim()}
-                        >
-                            {joining ? (
-                                <>
-                                    <span className="spinner" /> Finding your
-                                    people…
-                                </>
-                            ) : (
-                                <>
-                                    Enter your space{' '}
-                                    <Icon name="arrow" size={19} />
-                                </>
-                            )}
-                        </button>
-                    </form>
-                    <div className="login-footnote">
-                        <Icon name="shield" size={18} />
-                        <span>
-                            Your browser handles encryption.
-                            <br />
-                            Your conversations stay between you.
-                        </span>
-                    </div>
-                </section>
-            </div>
-            <footer className="login-bottom">
-                <span>Less noise. More connection.</span>
-                <span>
-                    Built for a small circle{' '}
-                    <span className="tiny-star">✳</span>
-                </span>
-            </footer>
+                    </button>
+                </form>
+            </section>
         </main>
     );
 }
@@ -267,9 +183,36 @@ function VoiceNote({
     );
 }
 
+const clock = (time: number) =>
+    new Date(time).toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+    });
+
+function dayLabel(time: number) {
+    const date = new Date(time);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return date.toLocaleDateString([], {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        ...(date.getFullYear() !== today.getFullYear() && {
+            year: 'numeric',
+        }),
+    });
+}
+
+// Messages from one person within a few minutes share a single header.
+const GROUP_MS = 5 * 60_000;
+
 function ChatMessage({
     message,
     self,
+    continued,
     selectionMode,
     selected,
     toggle,
@@ -281,6 +224,7 @@ function ChatMessage({
 }: {
     message: Message;
     self: string;
+    continued: boolean;
     selectionMode: boolean;
     selected: boolean;
     toggle: (id: string, range?: boolean) => void;
@@ -293,7 +237,7 @@ function ChatMessage({
     const mine = message.from === self;
     return (
         <article
-            className={`message ${mine ? 'mine' : ''} ${selected ? 'is-selected' : ''}`}
+            className={`message ${mine ? 'mine' : ''} ${continued ? 'continued' : ''} ${selected ? 'is-selected' : ''}`}
             data-testid="chat-message"
             data-message-id={message.id}
             tabIndex={0}
@@ -362,9 +306,21 @@ function ChatMessage({
                     onChange={() => {}}
                 />
             )}
-            <Avatar id={message.from} name={message.name} />
+            {continued ? (
+                <span className="message-gutter" aria-hidden="true">
+                    {mine && message.status === 'sending' ? (
+                        <Icon name="clock" size={13} />
+                    ) : (
+                        clock(message.time)
+                    )}
+                </span>
+            ) : (
+                <Avatar id={message.from} name={message.name} />
+            )}
             <div className="message-main">
-                <div className="message-meta">
+                <div
+                    className={`message-meta ${continued ? 'visually-hidden' : ''}`}
+                >
                     <strong
                         className="author-name"
                         style={
@@ -375,20 +331,14 @@ function ChatMessage({
                     >
                         {message.name}
                     </strong>
-                    {mine && <span className="you-label">you</span>}
                     <time dateTime={new Date(message.time).toISOString()}>
-                        {new Date(message.time).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                        })}
+                        {clock(message.time)}
                     </time>
                     {mine && (
                         <span
                             className="message-delivery"
                             title={
-                                message.status === 'sent'
-                                    ? 'Received by the server, encrypted'
-                                    : 'Waiting for confirmation'
+                                message.status === 'sent' ? 'Sent' : 'Sending…'
                             }
                         >
                             <Icon
@@ -893,7 +843,7 @@ function Composer({
                                 label={
                                     recipient
                                         ? `Message ${recipient.name}`
-                                        : 'Message the living room'
+                                        : 'Message #general'
                                 }
                                 placeholder={
                                     offline
@@ -912,7 +862,7 @@ function Composer({
                                               ? 'Message…'
                                               : recipient
                                                 ? `Message ${recipient.name}`
-                                                : 'Message the living room'
+                                                : 'Message #general'
                                 }
                                 value={text}
                                 onChange={(value, cursor) => {
@@ -1258,67 +1208,64 @@ function ModalView({
                 </span>
                 {modal.type === 'privacy' ? (
                     <>
-                        <div className="eyebrow">BETWEEN YOUR PEOPLE</div>
-                        <h2>Private by design.</h2>
+                        <h2>Privacy & encryption</h2>
                         <p>
-                            Your browser encrypts each message before it leaves
-                            your device. The server relays encrypted messages
-                            and keeps them in memory until it shuts down.
+                            Messages are encrypted in your browser before they
+                            are sent. The server relays the encrypted copies and
+                            keeps them in memory until it restarts.
                         </p>
                         <div className="privacy-row">
                             <Icon name="lock" />
                             <div>
-                                <strong>Your conversations, your keys.</strong>
+                                <strong>Messages</strong>
                                 <p>
-                                    Messages use the Signal protocol: each has
-                                    its own key, and only intended recipients
-                                    can decrypt it. A new arrival can read
-                                    messages sent after they join, plus any room
-                                    history an existing member explicitly shares
-                                    with them.
+                                    Signal protocol: each message has its own
+                                    key and only its recipients can decrypt it.
+                                    People who join later see new messages, plus
+                                    any history someone shares with them.
                                 </p>
                             </div>
                         </div>
                         <div className="privacy-row">
                             <Icon name="clock" />
                             <div>
-                                <strong>Here for now. Gone on restart.</strong>
+                                <strong>Storage</strong>
                                 <p>
-                                    No message files, database, or message logs.
-                                    Encryption keys are stored in your browser
-                                    so refreshing can recover your messages.
+                                    Nothing is written to disk on the server.
+                                    Messages and files are gone when it
+                                    restarts. Your browser keeps its encryption
+                                    keys, so a refresh restores your messages.
                                 </p>
                             </div>
                         </div>
                         <div className="privacy-row">
                             <Icon name="video" />
                             <div>
-                                <strong>Calls sealed end to end.</strong>
+                                <strong>Calls</strong>
                                 <p>
-                                    Voice, video, and screen sharing are
+                                    Voice, video and screen sharing are
                                     encrypted with keys only the people in the
                                     call hold. The server forwards media it
-                                    can’t decrypt. Calls aren’t recorded.
+                                    cannot decrypt. Calls are not recorded.
                                 </p>
                             </div>
                         </div>
                         <div className="privacy-note">
-                            Display names and connection information are visible
-                            to the server. For extra assurance, compare a safety
-                            code with each friend using another trusted channel.
+                            The server sees display names and connection
+                            details. To be sure who you are talking to, compare
+                            safety codes over another trusted channel.
                         </div>
                         <button className="primary" onClick={dismiss}>
-                            Sounds good <Icon name="check" size={18} />
+                            OK
                         </button>
                     </>
                 ) : (
                     <>
-                        <div className="eyebrow">VERIFY YOUR CONNECTION</div>
-                        <h2>You & {modal.peer.name}</h2>
+                        <h2>Safety code with {modal.peer.name}</h2>
                         <p>
                             Compare this code with {modal.peer.name} in person
-                            or using another trusted channel. Both browsers
-                            should show the same code.
+                            or over another trusted channel. You should both see
+                            the same code.
                         </p>
                         <div className="safety-code">
                             {code
@@ -1330,9 +1277,9 @@ function ModalView({
                                 : 'Calculating…'}
                         </div>
                         <p className="small-text">
-                            The code changes if either person clears their
+                            The code changes if either of you clears this
                             browser’s encryption keys. A matching name alone
-                            does not verify someone’s identity.
+                            does not prove who someone is.
                         </p>
                         <button
                             className="primary"
@@ -1350,7 +1297,7 @@ function ModalView({
                         >
                             {verified
                                 ? 'Verified in this browser'
-                                : 'We compared these codes'}
+                                : 'Codes match'}
                             <Icon name="check" size={18} />
                         </button>
                     </>
@@ -1397,6 +1344,14 @@ function App() {
     const deleting = useRef(new Set<string>());
     const scroll = useRef<HTMLDivElement>(null);
     const nearBottom = useRef(true);
+    const [atLatest, setAtLatest] = useState(true);
+    // The first message that arrived while this conversation was not open.
+    const [newSince, setNewSince] = useState<{
+        scope: string;
+        id: string;
+    } | null>(null);
+    const shownScope = useRef('');
+    const sentLast = useRef('');
     useChatViewport(
         mobile && (state.phase === 'online' || state.phase === 'reconnecting'),
         scroll,
@@ -1421,6 +1376,7 @@ function App() {
     }, []);
     useEffect(() => {
         nearBottom.current = true;
+        setAtLatest(true);
         setSearch('');
         setSearchOpen(false);
         setSelected([]);
@@ -1474,8 +1430,38 @@ function App() {
         });
     }, [state.messages]);
     useEffect(() => {
-        if (nearBottom.current && scroll.current)
-            scroll.current.scrollTop = scroll.current.scrollHeight;
+        const el = scroll.current;
+        if (!el) return;
+        if (shownScope.current !== state.scope) {
+            shownScope.current = state.scope;
+            // Open at the first unread message when there is more to read
+            // than fits on screen.
+            const line = el.querySelector('.new-divider');
+            if (line) {
+                const top =
+                    line.getBoundingClientRect().top -
+                    el.getBoundingClientRect().top;
+                if (top > el.clientHeight - 80) {
+                    el.scrollTop += top - 48;
+                    nearBottom.current = false;
+                    setAtLatest(false);
+                    return;
+                }
+            }
+        }
+        // Sending a message always brings the conversation back to the end.
+        const last = state.messages.at(-1);
+        if (
+            last?.status === 'sending' &&
+            last.from === state.self &&
+            last.scope === state.scope &&
+            last.id !== sentLast.current
+        ) {
+            sentLast.current = last.id;
+            nearBottom.current = true;
+            setAtLatest(true);
+        }
+        if (nearBottom.current) el.scrollTop = el.scrollHeight;
     }, [state.messages.length, state.presence.length, state.scope]);
     if (state.phase === 'loading')
         return (
@@ -1497,7 +1483,7 @@ function App() {
                   (p) => p.id !== self && dmScope(self, p.id) === state.scope
               )
             : undefined;
-    const title = recipient?.name || 'The living room';
+    const title = recipient?.name || 'general';
     const conversationMessages = state.messages.filter(
         (m) => m.scope === state.scope
     );
@@ -1715,6 +1701,12 @@ function App() {
             state.messages.some((m) => m.scope === dmScope(self, p.id))
     );
     const select = (scope: string) => {
+        const count = state.unread[scope] || 0;
+        const unseen = state.messages.filter(
+            (m) => m.scope === scope && m.from !== self
+        );
+        const first = count ? unseen[Math.max(0, unseen.length - count)] : null;
+        setNewSince(first ? { scope, id: first.id } : null);
         client.select(scope);
         setMobileNav(false);
     };
@@ -1734,13 +1726,9 @@ function App() {
             >
                 <div className="space-heading">
                     <div>
-                        <h1>
-                            Our little space
-                            <span className="wordmark-dot">.</span>
-                        </h1>
+                        <h1>Hush</h1>
                         <span>
-                            <i className="online-dot" /> {online.length} of{' '}
-                            {state.config?.maxClients} here
+                            <i className="online-dot" /> {online.length} online
                         </span>
                     </div>
                     <IconButton
@@ -1753,7 +1741,7 @@ function App() {
                                 .writeText(link)
                                 .then(() =>
                                     client.notify(
-                                        'Invite link copied. Share the password separately.'
+                                        'Link copied. Share the password separately.'
                                     )
                                 )
                                 .catch(() => client.notify(link));
@@ -1761,13 +1749,13 @@ function App() {
                     />
                 </div>
                 <div className="sidebar-content">
-                    <div className="section-caption">YOUR SPACE</div>
+                    <div className="section-caption">Channels</div>
                     <button
                         className={`channel-row ${state.scope === 'room' ? 'selected' : ''}`}
                         onClick={() => select('room')}
                     >
                         <Icon name="hash" />
-                        <span>The living room</span>
+                        <span>general</span>
                         {Boolean(state.unread.room) && (
                             <b className="unread-badge">{state.unread.room}</b>
                         )}
@@ -1782,7 +1770,7 @@ function App() {
                         disabled={state.phase !== 'online'}
                     >
                         <Icon name="volume" />
-                        <span>The lounge</span>
+                        <span>voice</span>
                         {roomCall.length > 0 && (
                             <span className="voice-count">
                                 {roomCall.length}
@@ -1804,7 +1792,7 @@ function App() {
                         </div>
                     )}
                     <div className="section-caption dm-caption">
-                        DIRECT MESSAGES
+                        Direct messages
                     </div>
                     {dmPeers.length ? (
                         dmPeers.map((p) => {
@@ -1824,7 +1812,7 @@ function App() {
                                         {p.name}
                                         <small>
                                             {p.call === scope
-                                                ? 'In a private call'
+                                                ? 'In a call'
                                                 : p.online
                                                   ? 'Online'
                                                   : 'Offline'}
@@ -1839,22 +1827,23 @@ function App() {
                             );
                         })
                     ) : (
-                        <p className="sidebar-empty">
-                            Your people will appear here
-                            <br />
-                            when they join.
-                        </p>
+                        <p className="sidebar-empty">No one else yet.</p>
                     )}
                 </div>
                 {state.call && (
                     <div className="sidebar-call">
                         <Icon name="volume" size={17} />
                         <div>
-                            <strong>In a call</strong>
+                            <strong>Voice connected</strong>
                             <small>
                                 {state.call.scope === 'room'
-                                    ? 'The lounge'
-                                    : 'Private conversation'}
+                                    ? 'voice'
+                                    : state.peers.find(
+                                          (p) =>
+                                              p.id !== self &&
+                                              state.call!.scope ===
+                                                  dmScope(self, p.id)
+                                      )?.name || 'Private call'}
                             </small>
                         </div>
                         <IconButton
@@ -1878,7 +1867,7 @@ function App() {
                     </div>
                     <IconButton
                         icon="logout"
-                        label="Leave this space"
+                        label="Log out"
                         onClick={() => setLogoutOpen(true)}
                     />
                 </div>
@@ -2022,8 +2011,7 @@ function App() {
                 </header>
                 {state.phase === 'reconnecting' && (
                     <div className="connection-banner" role="status">
-                        <span className="spinner" /> Reconnecting… Your draft
-                        stays in this tab.
+                        <span className="spinner" /> Reconnecting…
                     </div>
                 )}
                 {incoming && (
@@ -2074,7 +2062,7 @@ function App() {
                                         ?.focus();
                                 }
                             }}
-                            placeholder="Find something in this conversation…"
+                            placeholder="Search this conversation"
                             autoFocus
                         />
                         <span>{search && `${messages.length} found`}</span>
@@ -2093,114 +2081,134 @@ function App() {
                     ref={scroll}
                     onScroll={() => {
                         const el = scroll.current;
-                        if (el)
-                            nearBottom.current =
-                                el.scrollHeight -
-                                    el.scrollTop -
-                                    el.clientHeight <
-                                100;
+                        if (!el) return;
+                        nearBottom.current =
+                            el.scrollHeight - el.scrollTop - el.clientHeight <
+                            100;
+                        setAtLatest(nearBottom.current);
                     }}
                 >
-                    {conversationMessages.length === 0 && !search && (
-                        <div className="conversation-intro">
-                            <div className="intro-icon">
-                                {recipient ? (
-                                    <Avatar
-                                        id={recipient.id}
-                                        name={recipient.name}
-                                        size="large"
-                                    />
-                                ) : (
-                                    <Icon name="hash" size={34} />
-                                )}
-                            </div>
-                            <div className="eyebrow">
-                                {recipient
-                                    ? 'JUST THE TWO OF YOU'
-                                    : 'YOUR EVERYDAY HANGOUT'}
-                            </div>
-                            <h2>
-                                {recipient
-                                    ? `Hey, ${recipient.name}.`
-                                    : 'Make yourself at home.'}
-                            </h2>
-                            <p>
-                                {recipient
-                                    ? 'A private little corner for your conversation.'
-                                    : 'For the small updates, the big ideas, and everything in between.'}
-                            </p>
-                        </div>
-                    )}
                     <div
                         className="messages"
                         role="log"
                         aria-label="Conversation messages"
                         aria-live="polite"
                     >
-                        {timeline.map((item) =>
-                            item.type === 'message' ? (
-                                <ChatMessage
-                                    message={item.message}
-                                    self={self}
-                                    key={item.id}
-                                    selected={selected.includes(item.id)}
-                                    selectionMode={selectionMode}
-                                    toggle={toggle}
-                                    menu={openMenu}
-                                    edit={editMessage}
-                                    remove={deleteMessage}
-                                    editing={editing === item.id}
-                                    closeEditor={() => {
-                                        setEditing(null);
-                                        document
-                                            .querySelector<HTMLElement>(
-                                                '.composer [role="textbox"]'
-                                            )
-                                            ?.focus();
-                                    }}
-                                />
-                            ) : (
-                                <div
-                                    className={`presence-event ${item.event.action}`}
-                                    key={item.id}
-                                >
-                                    <Icon
-                                        name={
-                                            item.event.action === 'joined'
-                                                ? 'arrow'
-                                                : 'logout'
-                                        }
-                                        size={15}
-                                    />
-                                    <span>
-                                        <strong>{item.event.name}</strong>{' '}
-                                        {item.event.action} the room
-                                    </span>
-                                    <time
-                                        dateTime={new Date(
-                                            item.time
-                                        ).toISOString()}
-                                    >
-                                        {new Date(item.time).toLocaleTimeString(
-                                            [],
-                                            {
-                                                hour: '2-digit',
-                                                minute: '2-digit',
+                        {timeline.map((item, index) => {
+                            const previous = timeline[index - 1];
+                            const newDay =
+                                !previous ||
+                                new Date(previous.time).toDateString() !==
+                                    new Date(item.time).toDateString();
+                            const firstNew =
+                                !search &&
+                                newSince?.scope === state.scope &&
+                                newSince.id === item.id;
+                            return (
+                                <React.Fragment key={item.id}>
+                                    {newDay && (
+                                        <div className="date-divider">
+                                            <span>{dayLabel(item.time)}</span>
+                                        </div>
+                                    )}
+                                    {firstNew && (
+                                        <div className="new-divider">
+                                            <span>New</span>
+                                        </div>
+                                    )}
+                                    {item.type === 'message' ? (
+                                        <ChatMessage
+                                            message={item.message}
+                                            self={self}
+                                            continued={
+                                                !newDay &&
+                                                !firstNew &&
+                                                previous.type === 'message' &&
+                                                previous.message.from ===
+                                                    item.message.from &&
+                                                previous.message.sharedBy ===
+                                                    item.message.sharedBy &&
+                                                item.time - previous.time <
+                                                    GROUP_MS
                                             }
-                                        )}
-                                    </time>
-                                </div>
-                            )
-                        )}
+                                            selected={selected.includes(
+                                                item.id
+                                            )}
+                                            selectionMode={selectionMode}
+                                            toggle={toggle}
+                                            menu={openMenu}
+                                            edit={editMessage}
+                                            remove={deleteMessage}
+                                            editing={editing === item.id}
+                                            closeEditor={() => {
+                                                setEditing(null);
+                                                document
+                                                    .querySelector<HTMLElement>(
+                                                        '.composer [role="textbox"]'
+                                                    )
+                                                    ?.focus();
+                                            }}
+                                        />
+                                    ) : (
+                                        <div
+                                            className={`presence-event ${item.event.action}`}
+                                        >
+                                            <Icon
+                                                name={
+                                                    item.event.action ===
+                                                    'joined'
+                                                        ? 'arrow'
+                                                        : 'logout'
+                                                }
+                                                size={15}
+                                            />
+                                            <span>
+                                                <strong>
+                                                    {item.event.name}
+                                                </strong>{' '}
+                                                {item.event.action}
+                                            </span>
+                                            <time
+                                                dateTime={new Date(
+                                                    item.time
+                                                ).toISOString()}
+                                            >
+                                                {clock(item.time)}
+                                            </time>
+                                        </div>
+                                    )}
+                                </React.Fragment>
+                            );
+                        })}
                     </div>
                     {messages.length === 0 && search && (
                         <div className="empty-conversation">
                             <Icon name="search" size={28} />
-                            <p>No messages match your search.</p>
-                            <small>Try another word or phrase.</small>
+                            <p>No results.</p>
                         </div>
                     )}
                 </div>
+                {!atLatest && (
+                    <div className="jump-latest-anchor">
+                        <button
+                            className="jump-latest"
+                            onClick={() => {
+                                const el = scroll.current;
+                                el?.scrollTo({
+                                    top: el.scrollHeight,
+                                    behavior: matchMedia(
+                                        '(prefers-reduced-motion: reduce)'
+                                    ).matches
+                                        ? 'auto'
+                                        : 'smooth',
+                                });
+                            }}
+                        >
+                            <Icon name="arrowDown" size={15} />
+                            Jump to latest
+                        </button>
+                    </div>
+                )}
                 {selectionMode && (
                     <div
                         className="selection-bar"
@@ -2307,11 +2315,11 @@ function App() {
                 <aside className="members-panel">
                     <div className="members-header">
                         <Icon name="people" size={17} />
-                        <h2>Your people</h2>
+                        <h2>Members</h2>
                         <span>{online.length}</span>
                     </div>
                     <div className="section-caption">
-                        HERE NOW — {online.length}
+                        Online — {online.length}
                     </div>
                     {online.map((p) => (
                         <div className="member-item" key={p.id}>

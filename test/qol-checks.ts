@@ -285,7 +285,7 @@ export async function checkPopoutVolume(popup: Page, parent: Page) {
                 )
         )
         .toBe(true);
-    await popup.getByText('The lounge', { exact: true }).click();
+    await popup.getByText('voice', { exact: true }).click();
     await expect(slider).toBeHidden();
     console.log(
         'PASS: popped-out volume controls update audio in the original tab and dismiss on an outside click'
@@ -298,6 +298,80 @@ async function send(page: Page, text: string) {
         .getByRole('button', { name: 'Send message', exact: true })
         .click();
     await expectInput(page.locator('.composer [role="textbox"]'), '');
+}
+
+export async function checkMessageLayout(alice: Page, bob: Page) {
+    const row = (page: Page, text: string) =>
+        page.getByTestId('chat-message').filter({
+            has: page.getByText(text, { exact: true }),
+        });
+    const open = (page: Page, rows: string, name: string) =>
+        page.locator(rows).filter({ hasText: name }).click();
+    for (const page of [alice, bob])
+        await open(page, '.channel-row', 'general');
+    await send(bob, 'Layout from Bob');
+    await send(alice, 'Layout first line');
+    await send(alice, 'Layout second line');
+    for (const page of [alice, bob]) {
+        const first = row(page, 'Layout first line');
+        const second = row(page, 'Layout second line');
+        await expect(second).toHaveClass(/\bcontinued\b/);
+        await expect(first).not.toHaveClass(/\bcontinued\b/);
+        await expect(first.locator('.avatar')).toBeVisible();
+        await expect(second.locator('.avatar')).toHaveCount(0);
+        // The header is hidden, but screen readers still hear the author.
+        await expect(second.locator('.author-name')).toHaveText('Alice');
+        await expect(second.locator('.message-meta')).toHaveClass(
+            /visually-hidden/
+        );
+        await expect(page.locator('.date-divider').first()).toHaveText('Today');
+    }
+
+    // Messages that arrive elsewhere are marked when the conversation opens.
+    await open(alice, '.dm-row', 'Bob');
+    await send(alice, 'Unread one');
+    await send(alice, 'Unread two');
+    const dm = bob.locator('.dm-row').filter({ hasText: 'Alice' });
+    await expect(dm.locator('.unread-badge')).toHaveText('2');
+    const size = bob.viewportSize()!;
+    await bob.setViewportSize({ width: 1000, height: 520 });
+    await dm.click();
+    await expect(bob.locator('.new-divider')).toBeVisible();
+    await expect(
+        bob.locator('.new-divider + [data-testid="chat-message"] .message-text')
+    ).toHaveText('Unread one');
+    await open(bob, '.channel-row', 'general');
+    await dm.click();
+    await expect(bob.locator('.new-divider')).toHaveCount(0);
+
+    // Scrolling back offers a way to the latest message, and sending returns
+    // there on its own.
+    const scroller = bob.locator('.message-scroll');
+    const overflow = () =>
+        scroller.evaluate((el) => el.scrollHeight - el.clientHeight);
+    let filler = 0;
+    while ((await overflow()) < 400 && filler < 40)
+        await send(alice, `Filler ${++filler}`);
+    await expect(row(bob, `Filler ${filler}`)).toBeInViewport();
+    const atEnd = () =>
+        scroller.evaluate(
+            (el) => el.scrollHeight - el.scrollTop - el.clientHeight < 100
+        );
+    const jump = bob.getByRole('button', { name: 'Jump to latest' });
+    await expect(jump).toHaveCount(0);
+    await scroller.evaluate((el) => (el.scrollTop = 0));
+    await jump.click();
+    await expect(jump).toHaveCount(0);
+    await expect.poll(atEnd).toBe(true);
+    await scroller.evaluate((el) => (el.scrollTop = 0));
+    await expect(jump).toBeVisible();
+    await send(bob, 'Back at the end');
+    await expect(jump).toHaveCount(0);
+    await expect.poll(atEnd).toBe(true);
+    await bob.setViewportSize(size);
+    console.log(
+        'PASS: grouped messages, date and unread dividers, and jump to latest'
+    );
 }
 
 export async function checkMarkdown(alice: Page, bob: Page) {
@@ -322,7 +396,7 @@ export async function checkMarkdown(alice: Page, bob: Page) {
         .getByRole('button', { name: 'Formatting help', exact: true })
         .click();
     const helper = alice.getByRole('dialog', {
-        name: 'Format your messages',
+        name: 'Formatting',
         exact: true,
     });
     await expect(helper).toBeVisible();
@@ -406,7 +480,7 @@ export async function checkClearChat(
     await send(alice.page, 'This private message survives a room clear.');
     await alice.page
         .locator('.channel-row')
-        .filter({ hasText: 'The living room' })
+        .filter({ hasText: 'general' })
         .click();
     const openClear = async (page: Page) => {
         await page
@@ -449,7 +523,7 @@ export async function checkClearChat(
     await alice.page.reload();
     await expect(
         alice.page.getByRole('heading', {
-            name: 'The living room',
+            name: 'general',
             exact: true,
         })
     ).toBeVisible();

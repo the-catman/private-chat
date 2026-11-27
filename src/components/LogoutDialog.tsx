@@ -46,10 +46,10 @@ export function LogoutDialog({
         >
             <SheetHandle />
             <div className="modal-content">
-                <h2 id="logout-title">Log out of this space?</h2>
+                <h2 id="logout-title">Log out?</h2>
                 <p id="logout-description">
-                    You’ll need the room password to join again.
-                    {inCall && ' You’ll also leave your active call.'}
+                    You’ll need the password to log back in.
+                    {inCall && ' You’ll also leave the call.'}
                 </p>
                 {error && (
                     <p className="form-error" role="alert">

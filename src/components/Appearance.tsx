@@ -5,7 +5,7 @@ import type { CallState } from '../types';
 import { useMobilePanel } from './useMobilePanel';
 import { SheetHandle } from './SheetHandle';
 
-type Theme = 'dark' | 'light';
+type Theme = 'system' | 'light' | 'dark';
 type Size = 'compact' | 'comfortable' | 'large';
 const sizes: Record<Size, string> = {
     compact: '14px',
@@ -19,18 +19,32 @@ const read = (key: string) => {
         return null;
     }
 };
-let theme: Theme = read('hush-theme') === 'light' ? 'light' : 'dark';
+const saved = read('hush-theme');
+// Follows the browser or OS setting until someone picks light or dark.
+let theme: Theme = saved === 'light' || saved === 'dark' ? saved : 'system';
+const prefersLight =
+    typeof matchMedia === 'function'
+        ? matchMedia('(prefers-color-scheme: light)')
+        : null;
+const resolved = () =>
+    theme === 'system' ? (prefersLight?.matches ? 'light' : 'dark') : theme;
+const listeners = new Set<() => void>();
 let textSize: Size = (
     ['compact', 'comfortable', 'large'].includes(read('hush-text-size') || '')
         ? read('hush-text-size')
         : 'comfortable'
 ) as Size;
 function apply() {
-    document.documentElement.dataset.theme = theme;
+    const mode = resolved();
+    document.documentElement.dataset.theme = mode;
     document.documentElement.style.fontSize = sizes[textSize];
-    document.documentElement.style.colorScheme = theme;
+    document.documentElement.style.colorScheme = mode;
+    for (const listener of listeners) listener();
 }
 apply();
+prefersLight?.addEventListener('change', () => {
+    if (theme === 'system') apply();
+});
 
 export function AppearanceControls({
     onPrivacy,
@@ -50,7 +64,13 @@ export function AppearanceControls({
     hideControls?: boolean;
 }) {
     const [current, setCurrent] = useState(theme);
+    const [mode, setMode] = useState(resolved);
     const [size, setSize] = useState(textSize);
+    useEffect(() => {
+        const update = () => setMode(resolved());
+        listeners.add(update);
+        return () => void listeners.delete(update);
+    }, []);
     const [internalOpen, setInternalOpen] = useState(false);
     const open = controlledOpen ?? internalOpen;
     const setOpen = onOpenChange ?? setInternalOpen;
@@ -79,13 +99,13 @@ export function AppearanceControls({
                 <>
                     <button
                         className="icon-button"
-                        aria-label={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
-                        title={`Switch to ${current === 'dark' ? 'light' : 'dark'} mode`}
+                        aria-label={`Switch to ${mode === 'dark' ? 'light' : 'dark'} mode`}
+                        title={`Switch to ${mode === 'dark' ? 'light' : 'dark'} mode`}
                         onClick={() =>
-                            change(current === 'dark' ? 'light' : 'dark', size)
+                            change(mode === 'dark' ? 'light' : 'dark', size)
                         }
                     >
-                        <Icon name={current === 'dark' ? 'sun' : 'moon'} />
+                        <Icon name={mode === 'dark' ? 'sun' : 'moon'} />
                     </button>
                     <button
                         className="icon-button"
@@ -119,10 +139,8 @@ export function AppearanceControls({
                         >
                             <Icon name="close" />
                         </button>
-                        <h2 id="appearance-title">
-                            Make yourself comfortable.
-                        </h2>
-                        <p>Your preferences stay in this browser.</p>
+                        <h2 id="appearance-title">Settings</h2>
+                        <p>Saved in this browser.</p>
                         <div
                             className="settings-tabs"
                             role="tablist"
@@ -183,26 +201,23 @@ export function AppearanceControls({
                             {section === 'appearance' ? (
                                 <>
                                     <fieldset className="preference">
-                                        <legend>Color theme</legend>
-                                        {(['dark', 'light'] as const).map(
-                                            (value) => (
-                                                <label key={value}>
-                                                    <input
-                                                        type="radio"
-                                                        name="theme"
-                                                        checked={
-                                                            current === value
-                                                        }
-                                                        onChange={() =>
-                                                            change(value, size)
-                                                        }
-                                                    />
-                                                    {value === 'dark'
-                                                        ? 'Dark'
-                                                        : 'Light'}
-                                                </label>
-                                            )
-                                        )}
+                                        <legend>Theme</legend>
+                                        {(
+                                            ['system', 'light', 'dark'] as const
+                                        ).map((value) => (
+                                            <label key={value}>
+                                                <input
+                                                    type="radio"
+                                                    name="theme"
+                                                    checked={current === value}
+                                                    onChange={() =>
+                                                        change(value, size)
+                                                    }
+                                                />
+                                                {value.charAt(0).toUpperCase() +
+                                                    value.slice(1)}
+                                            </label>
+                                        ))}
                                     </fieldset>
                                     <fieldset className="preference">
                                         <legend>Text size</legend>

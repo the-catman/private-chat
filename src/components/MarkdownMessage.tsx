@@ -92,8 +92,8 @@ export function MarkdownHelp({ close }: { close: () => void }) {
                 >
                     <Icon name="close" />
                 </button>
-                <h2 id="markdown-title">Format your messages</h2>
-                <p>Type Markdown to format your message as you write.</p>
+                <h2 id="markdown-title">Formatting</h2>
+                <p>Messages support Markdown.</p>
                 <div className="markdown-examples">
                     {examples.map(([name, example]) => (
                         <div className="markdown-example" key={name}>

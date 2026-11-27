@@ -105,7 +105,7 @@ export async function checkMobileLayout(page: Page, peer: Page, touch = false) {
         .getByRole('menuitem', { name: 'Formatting help', exact: true })
         .click();
     await expect(
-        page.getByRole('dialog', { name: 'Format your messages', exact: true })
+        page.getByRole('dialog', { name: 'Formatting', exact: true })
     ).toBeVisible();
     await page
         .getByRole('button', { name: 'Close formatting help', exact: true })

@@ -332,7 +332,7 @@ export function createChatServer(
                 ) {
                     failedLogin(client);
                     return json(res, 401, {
-                        error: 'That password is not right. Try again.',
+                        error: 'Wrong password.',
                     });
                 }
                 if (sessions.size >= 128)
@@ -356,7 +356,7 @@ export function createChatServer(
                 const auth = session(req);
                 if (!auth)
                     return json(res, 401, {
-                        error: 'Please enter the room password.',
+                        error: 'Enter the password.',
                     });
                 return json(res, 200, {
                     boot,

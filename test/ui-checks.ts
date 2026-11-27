@@ -55,7 +55,7 @@ export async function checkUiChanges(page: Page, peer: Page, mobile = false) {
     const composer = page.locator('.composer [role="textbox"]');
     await openSettings(page, mobile);
     const settings = page.getByRole('dialog', {
-        name: 'Make yourself comfortable.',
+        name: 'Settings',
         exact: true,
     });
     for (const method of ['button', 'escape']) {
@@ -63,12 +63,10 @@ export async function checkUiChanges(page: Page, peer: Page, mobile = false) {
             .getByRole('button', { name: 'Privacy & encryption', exact: true })
             .click();
         await expect(
-            page.getByRole('heading', { name: 'Private by design.' })
+            page.getByRole('heading', { name: 'Privacy & encryption' })
         ).toBeVisible();
         if (method === 'button')
-            await page
-                .getByRole('button', { name: 'Sounds good', exact: true })
-                .click();
+            await page.getByRole('button', { name: 'OK', exact: true }).click();
         else await page.keyboard.press('Escape');
         await expect(settings).toBeVisible();
         await expect(
