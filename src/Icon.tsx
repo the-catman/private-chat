@@ -204,6 +204,10 @@ const paths: Record<string, React.ReactNode> = {
         </>
     ),
     volumeOff: <path d="m11 4-6 5H2v6h3l6 5V4Zm5 5 6 6m0-6-6 6" />,
+    bell: <path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4l2-2Zm4 5h4" />,
+    bellOff: (
+        <path d="M8.5 5.1A6 6 0 0 1 18 11v4m-1 3H4l2-2v-5a6 6 0 0 1 .6-2.6M10 21h4M3 3l18 18" />
+    ),
     sliders: (
         <>
             <path d="M4 6h5m4 0h7M4 18h9m4 0h3M9 3v6m4 6v6" />

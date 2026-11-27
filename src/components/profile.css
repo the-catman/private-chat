@@ -415,3 +415,14 @@
         width: calc(100% - 24px);
     }
 }
+
+/* A muted conversation is dimmer and counts only mentions. */
+.muted-icon {
+    display: flex;
+    margin-left: auto;
+    color: var(--muted);
+}
+.channel-row:has(.muted-icon) > span:not(.muted-icon),
+.dm-row:has(.muted-icon) > span:not(.muted-icon) {
+    opacity: 0.7;
+}

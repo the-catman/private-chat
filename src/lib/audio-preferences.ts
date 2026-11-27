@@ -4,6 +4,9 @@ export type AudioPreferences = {
     volume: number;
     noiseReduction: NoiseReduction;
     shareAudio: boolean;
+    pushToTalk: boolean;
+    // A KeyboardEvent code, so it does not depend on the keyboard layout.
+    pushToTalkKey: string;
 };
 const read = (): Partial<AudioPreferences> => {
     try {
@@ -29,6 +32,12 @@ let preferences: AudioPreferences = {
             ? saved.noiseReduction
             : 'browser',
     shareAudio: saved.shareAudio !== false,
+    pushToTalk: saved.pushToTalk === true,
+    pushToTalkKey:
+        typeof saved.pushToTalkKey === 'string' &&
+        /^[A-Za-z0-9]{1,24}$/.test(saved.pushToTalkKey)
+            ? saved.pushToTalkKey
+            : 'Backquote',
 };
 const listeners = new Set<() => void>();
 export const getAudioPreferences = () => preferences;
@@ -48,3 +57,30 @@ export function setAudioPreferences(patch: Partial<AudioPreferences>) {
     } catch {}
     for (const listener of listeners) listener();
 }
+
+// A short name for a push-to-talk key code.
+const keyNames: Record<string, string> = {
+    Backquote: '`',
+    Minus: '-',
+    Equal: '=',
+    BracketLeft: '[',
+    BracketRight: ']',
+    Backslash: '\\',
+    Semicolon: ';',
+    Quote: "'",
+    Comma: ',',
+    Period: '.',
+    Slash: '/',
+    ControlLeft: 'Left Ctrl',
+    ControlRight: 'Right Ctrl',
+    ShiftLeft: 'Left Shift',
+    ShiftRight: 'Right Shift',
+    AltLeft: 'Left Alt',
+    AltRight: 'Right Alt',
+    CapsLock: 'Caps Lock',
+};
+export const keyName = (code: string) =>
+    keyNames[code] ??
+    code
+        .replace(/^Key(?=[A-Z]$)|^Digit(?=\d$)/, '')
+        .replace(/^Numpad/, 'Numpad ');

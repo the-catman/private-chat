@@ -180,3 +180,69 @@ export async function checkSpeakingCleanup(page: Page) {
         window.__testVoice = undefined;
     });
 }
+
+// Push to talk sends the microphone only while its key is held, and leaves
+// the key alone in text fields.
+export async function checkPushToTalk(alice: Page, bob: Page) {
+    const remote = speakingTile(alice, 'Bob');
+    const audioSettings = async () => {
+        await bob
+            .getByRole('button', { name: 'Audio settings', exact: true })
+            .click();
+        return bob.getByRole('dialog', {
+            name: 'Sound & microphone',
+            exact: true,
+        });
+    };
+    let dialog = await audioSettings();
+    await dialog.getByLabel('Push to talk', { exact: true }).check();
+    const key = dialog.getByRole('button', { name: 'Key `', exact: true });
+    await expect(key).toBeVisible();
+    // Choosing another key and back.
+    await key.click();
+    await bob.keyboard.press('KeyV');
+    await expect(
+        dialog.getByRole('button', { name: 'Key V', exact: true })
+    ).toBeVisible();
+    await dialog.getByRole('button', { name: 'Key V', exact: true }).click();
+    await bob.keyboard.press('Backquote');
+    await expect(key).toBeVisible();
+    await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    const hint = bob.locator('.push-to-talk');
+    await expect(hint).toHaveText('Hold ` to talk');
+
+    await voiceLevel(bob, 0.16);
+    await bob.waitForTimeout(800);
+    await expect(remote).toHaveAttribute('data-speaking', 'false');
+    await bob.keyboard.down('Backquote');
+    await expect(hint).toHaveText('Talking');
+    await expect(remote).toHaveAttribute('data-speaking', 'true');
+    await bob
+        .locator('.call-controls')
+        .screenshot({ path: 'test-results/push-to-talk.png' });
+    await bob.keyboard.up('Backquote');
+    await expect(hint).toHaveText('Hold ` to talk');
+    await expect(remote).toHaveAttribute('data-speaking', 'false');
+
+    // In the composer the key types instead.
+    const composer = bob.locator('.composer [role="textbox"]');
+    await composer.click();
+    await bob.keyboard.down('Backquote');
+    await bob.waitForTimeout(400);
+    await expect(hint).toHaveText('Hold ` to talk');
+    await bob.keyboard.up('Backquote');
+    await expect(composer).toHaveText('`');
+    await composer.fill('');
+
+    dialog = await audioSettings();
+    await dialog.getByLabel('Push to talk', { exact: true }).uncheck();
+    await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+    await expect(hint).toHaveCount(0);
+    await expect(remote).toHaveAttribute('data-speaking', 'true');
+    await voiceLevel(bob, 0);
+    await expect(remote).toHaveAttribute('data-speaking', 'false');
+    console.log(
+        'PASS: push to talk sends only while the key is held, a chosen key, and typing in the composer'
+    );
+}

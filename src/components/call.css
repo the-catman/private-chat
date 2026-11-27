@@ -379,3 +379,40 @@
         display: none;
     }
 }
+
+/* Push to talk: the key to hold, and whether the microphone is on. */
+.push-to-talk {
+    padding: 4px 9px;
+    border-radius: 7px;
+    color: var(--muted);
+    background: var(--panel-2);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    user-select: none;
+}
+.push-to-talk.talking {
+    color: var(--online);
+    background: color-mix(in srgb, var(--online) 16%, transparent);
+}
+@media (max-width: 520px) {
+    .push-to-talk:not(.talking) {
+        display: none;
+    }
+}
+.push-to-talk-key {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-left: 26px;
+    font-size: 0.875rem;
+}
+.push-to-talk-key button {
+    min-width: 64px;
+    padding: 6px 12px;
+    border-radius: 7px;
+    font-family: inherit;
+}
+.push-to-talk-key button[aria-pressed='true'] {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}

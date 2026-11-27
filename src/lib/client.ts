@@ -62,6 +62,16 @@ import {
     type OwnStatus,
 } from './profile.ts';
 import { replaceEmoji } from './emoji.ts';
+import {
+    countUnread,
+    latest,
+    mentionsYou,
+    storedMarks,
+    storedMuted,
+    storeMarks,
+    storeMuted,
+    type Marks,
+} from './unread.ts';
 import { CallEngine } from './rtc.ts';
 import {
     Ratchet,
@@ -116,6 +126,8 @@ const initial = (): ChatState => ({
     notice: '',
     typing: {},
     unread: {},
+    mentioned: {},
+    muted: storedMuted(),
     reactions: {},
     pins: {},
     profiles: {},
@@ -268,9 +280,45 @@ export class ChatClient {
         return () => this.listeners.delete(listener);
     };
     update = (patch: Partial<ChatState>) => {
-        this.state = { ...this.state, ...patch };
+        const next = { ...this.state, ...patch };
+        this.state =
+            'messages' in patch || 'scope' in patch || 'name' in patch
+                ? { ...next, ...this.counts(next) }
+                : next;
         for (const listener of this.listeners) listener();
     };
+    // What has been read, for this server boot. The open conversation is
+    // read while this tab is showing.
+    private marks: Marks = {};
+    private marksBoot = '';
+    private counts(state: ChatState) {
+        if (
+            this.marksBoot &&
+            (typeof document === 'undefined' ||
+                document.visibilityState === 'visible')
+        ) {
+            const mark = latest(
+                state.messages,
+                state.scope,
+                this.marks[state.scope]
+            );
+            if (mark !== (this.marks[state.scope] ?? 0)) {
+                this.marks = { ...this.marks, [state.scope]: mark };
+                storeMarks(this.marksBoot, this.marks);
+            }
+        }
+        return countUnread(state.messages, this.marks, state.self, state.name);
+    }
+    // After this tab is shown again.
+    markSeen() {
+        this.update({ scope: this.state.scope });
+    }
+    setMuted(scope: string, muted: boolean) {
+        const next = this.state.muted.filter((item) => item !== scope);
+        if (muted) next.push(scope);
+        storeMuted(next);
+        this.update({ muted: next });
+    }
     notify = (message: string) => {
         this.update({ notice: message });
         clearTimeout(this.noticeTimer);
@@ -598,6 +646,7 @@ export class ChatClient {
         }
         if (packet.type === 'ready') {
             this.liveHistory = false;
+            this.replayedClears.clear();
             this.retryCount = 0;
             localStorage.setItem('hush-name', this.state.name);
             this.seen.clear();
@@ -607,6 +656,10 @@ export class ChatClient {
             for (const m of this.state.messages)
                 if (m.bytes && !this.pending.has(m.id))
                     this.held.set(m.envelope.id, m.bytes);
+            if (this.marksBoot !== packet.boot) {
+                this.marksBoot = packet.boot;
+                this.marks = storedMarks(packet.boot);
+            }
             // Rebuild from the server's current ciphertext, including offline deletions.
             this.update({
                 phase: 'online',
@@ -615,7 +668,6 @@ export class ChatClient {
                 messages: this.state.messages.filter((m) =>
                     this.pending.has(m.id)
                 ),
-                unread: {},
                 typing: {},
                 reactions: {},
                 pins: {},
@@ -668,11 +720,15 @@ export class ChatClient {
             )
                 throw new Error('Invalid clear request.');
             if (this.clears.get(packet.scope) === marker) return;
-            // A recent clear empties the conversation. An older one, as
-            // replayed after a reconnect, only removes what came before it.
-            const recent = Math.abs(Date.now() - packet.time) <= 120_000;
+            // A clear made just now empties the conversation. One replayed
+            // after a reconnect or reload only removes what came before it:
+            // the history that follows it may already have been read here.
+            const recent =
+                this.liveHistory &&
+                Math.abs(Date.now() - packet.time) <= 120_000;
             const before = (time: number) => recent || time <= packet.time;
             this.clears.set(packet.scope, marker);
+            if (!recent) this.replayedClears.add(packet.scope);
             const removed = this.state.messages.filter(
                 (m) => m.scope === packet.scope && before(m.time)
             );
@@ -708,7 +764,6 @@ export class ChatClient {
                 ...(recent && {
                     presence:
                         packet.scope === 'room' ? [] : this.state.presence,
-                    unread: { ...this.state.unread, [packet.scope]: 0 },
                     typing: Object.fromEntries(
                         Object.entries(this.state.typing).filter(
                             ([key]) => !key.startsWith(`${packet.scope}:`)
@@ -717,11 +772,8 @@ export class ChatClient {
                 }),
             });
             if (this.liveHistory && recent) {
-                const name =
-                    packet.by === this.state.self
-                        ? 'You'
-                        : this.state.peers.find((p) => p.id === packet.by)
-                              ?.name || 'A member';
+                const name = this.memberName(packet.by);
+                this.clearedBy = { scope: packet.scope, name };
                 const channel = this.state.channels.find(
                     (c) => c.scope === packet.scope
                 );
@@ -793,12 +845,25 @@ export class ChatClient {
             return;
         }
         if (packet.type === 'channels') {
+            const gone = this.state.channels.filter(
+                (c) => !packet.channels.some((next) => next.scope === c.scope)
+            );
             this.update(this.withChannels(packet.channels));
+            // A deleted channel was cleared just before; say what happened.
+            const deleted = gone.find((c) => c.scope === this.clearedBy?.scope);
+            if (deleted)
+                this.notify(
+                    `${this.clearedBy!.name} deleted ${deleted.kind === 'text' ? '#' : ''}${deleted.name}.`
+                );
             return;
         }
         if (packet.type === 'history-end') {
             this.liveHistory = true;
             this.held.clear();
+            // Keys for what a replayed clear removed are not needed again.
+            for (const scope of this.replayedClears)
+                this.identity.ratchet.forgetScope(scope, this.keyIds(scope));
+            this.replayedClears.clear();
             for (const envelope of this.pending.values())
                 if (envelope.boot === this.state.config!.boot)
                     this.transmit(envelope);
@@ -1124,22 +1189,16 @@ export class ChatClient {
             edited: envelope.type === 'edit',
             sharedBy,
             historyGrant: m.type === 'share' ? m : undefined,
+            received: existing?.received ?? packet.received,
             bytes,
         };
         const messages = this.state.messages.filter((item) => item.id !== id);
         messages.push(message);
         messages.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
-        const unread = { ...this.state.unread };
-        if (
-            !existing &&
-            message.scope !== this.state.scope &&
-            message.from !== this.identity.id
-        )
-            unread[message.scope] = (unread[message.scope] || 0) + 1;
         // Someone who just sent a message has stopped typing it.
         const typing = { ...this.state.typing };
         delete typing[`${message.scope}:${message.from}`];
-        this.update({ messages, unread, typing });
+        this.update({ messages, typing });
         if (
             payload.kind === 'file' &&
             !bytes &&
@@ -1150,7 +1209,17 @@ export class ChatClient {
             this.liveHistory &&
             m.type === 'chat' &&
             !existing &&
-            message.from !== this.identity.id
+            message.from !== this.identity.id &&
+            (!this.state.muted.includes(message.scope) ||
+                mentionsYou(
+                    message,
+                    this.state.name,
+                    new Set(
+                        this.state.messages
+                            .filter((item) => item.from === this.identity.id)
+                            .map((item) => item.id)
+                    )
+                ))
         )
             this.cue('received');
     }
@@ -1697,8 +1766,32 @@ export class ChatClient {
             ),
         });
     }
+    private clearedBy?: { scope: string; name: string };
+    private replayedClears = new Set<string>();
+    // The envelopes in a conversation whose message keys are still in use.
+    private keyIds(scope: string) {
+        const ids = new Set<string>();
+        for (const m of this.state.messages)
+            if (m.scope === scope) {
+                ids.add(m.id).add(m.envelope.id);
+                if (m.historyGrant) ids.add(m.historyGrant.id);
+            }
+        for (const byAuthor of Object.values(this.state.reactions))
+            for (const reaction of Object.values(byAuthor))
+                if (reaction.scope === scope) ids.add(reaction.envelope);
+        for (const pin of Object.values(this.state.pins))
+            if (pin.scope === scope) ids.add(pin.envelope);
+        for (const profile of Object.values(this.state.profiles))
+            ids.add(profile.envelope);
+        return ids;
+    }
+    private memberName(id: string) {
+        return id === this.state.self
+            ? 'You'
+            : this.state.peers.find((p) => p.id === id)?.name || 'A member';
+    }
     select(scope: string) {
-        this.update({ scope, unread: { ...this.state.unread, [scope]: 0 } });
+        this.update({ scope });
     }
     private async startCall(
         scope: string,
@@ -1918,12 +2011,8 @@ export class ChatClient {
             !channelScope(scope) ||
             scope === 'room' ||
             channels.some((c) => c.scope === scope && c.kind === 'text');
-        const unread = Object.fromEntries(
-            Object.entries(this.state.unread).filter(([scope]) => open(scope))
-        );
         return {
             channels,
-            unread,
             ...(!open(this.state.scope) && { scope: 'room' }),
         };
     }

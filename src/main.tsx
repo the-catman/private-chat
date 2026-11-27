@@ -87,6 +87,7 @@ import './components/mobile.css';
 import './components/profile.css';
 import { installSoundActivation, playSound } from './lib/sounds';
 import { captureMicrophone } from './lib/microphone';
+import { setFavicon } from './lib/favicon';
 
 const client = new ChatClient(playSound);
 type Modal = { type: 'privacy' } | { type: 'safety'; peer: Peer } | null;
@@ -1807,6 +1808,41 @@ function App() {
         }
         if (nearBottom.current) el.scrollTop = el.scrollHeight;
     }, [state.messages.length, state.presence.length, state.scope]);
+    // Muted conversations count only mentions of you.
+    const alerts = (scope: string) =>
+        (state.muted.includes(scope) ? state.mentioned : state.unread)[scope] ||
+        0;
+    const unreadTotal = Object.keys(state.unread).reduce(
+        (sum, scope) => sum + alerts(scope),
+        0
+    );
+    useEffect(() => {
+        document.title = unreadTotal ? `(${unreadTotal}) Hush` : 'Hush';
+        setFavicon(unreadTotal > 0);
+    }, [unreadTotal]);
+    // Where this conversation's unread messages start, for the divider.
+    const markNew = (scope: string) => {
+        const { unread, messages, self } = client.state;
+        const count = unread[scope] || 0;
+        const unseen = messages.filter(
+            (m) => m.scope === scope && m.from !== self && m.status === 'sent'
+        );
+        const first = count ? unseen[Math.max(0, unseen.length - count)] : null;
+        setNewSince(first ? { scope, id: first.id } : null);
+    };
+    const markNewRef = useRef(markNew);
+    markNewRef.current = markNew;
+    // What arrived while this tab was hidden is read once it shows again.
+    useEffect(() => {
+        const shown = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (client.state.unread[client.state.scope])
+                markNewRef.current(client.state.scope);
+            client.markSeen();
+        };
+        document.addEventListener('visibilitychange', shown);
+        return () => document.removeEventListener('visibilitychange', shown);
+    }, []);
     if (state.phase === 'loading')
         return (
             <div className="loading-screen">
@@ -2235,16 +2271,21 @@ function App() {
             state.messages.some((m) => m.scope === dmScope(self, p.id))
     );
     const select = (scope: string) => {
-        const count = state.unread[scope] || 0;
-        const unseen = state.messages.filter(
-            (m) => m.scope === scope && m.from !== self
-        );
-        const first = count ? unseen[Math.max(0, unseen.length - count)] : null;
-        setNewSince(first ? { scope, id: first.id } : null);
+        markNew(scope);
         client.select(scope);
         setMobileNav(false);
     };
     const verified = verifiedIds();
+    const badge = (scope: string) =>
+        alerts(scope) ? (
+            <b className="unread-badge">{alerts(scope)}</b>
+        ) : (
+            state.muted.includes(scope) && (
+                <span className="muted-icon" role="img" aria-label="Muted">
+                    <Icon name="bellOff" size={14} />
+                </span>
+            )
+        );
     return (
         <main className="app-shell">
             {mobileNav && (
@@ -2300,11 +2341,7 @@ function App() {
                             >
                                 <Icon name="hash" />
                                 <span>{channel.name}</span>
-                                {Boolean(state.unread[channel.scope]) && (
-                                    <b className="unread-badge">
-                                        {state.unread[channel.scope]}
-                                    </b>
-                                )}
+                                {badge(channel.scope)}
                             </button>
                             {channel.scope !== 'room' && (
                                 <IconButton
@@ -2402,11 +2439,7 @@ function App() {
                                                 : statusLine(p)}
                                         </small>
                                     </span>
-                                    {Boolean(state.unread[scope]) && (
-                                        <b className="unread-badge">
-                                            {state.unread[scope]}
-                                        </b>
-                                    )}
+                                    {badge(scope)}
                                 </button>
                             );
                         })
@@ -2574,6 +2607,7 @@ function App() {
                             scope={state.scope}
                             title={title}
                             online={state.phase === 'online'}
+                            muted={state.muted.includes(state.scope)}
                             actions={
                                 mobile
                                     ? [
@@ -3310,4 +3344,5 @@ function App() {
     );
 }
 
+setFavicon(false);
 createRoot(document.getElementById('root')!).render(<App />);

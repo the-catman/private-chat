@@ -131,6 +131,7 @@ export async function checkChannels(alice: Person, bob: Person) {
             page.getByRole('heading', { name: 'general', exact: true })
         ).toBeVisible();
     }
+    await expect(b.locator('.toast')).toContainText('Alice deleted #plans.');
     console.log(
         'PASS: creating and deleting text and voice channels, the occupied voice guard, and the share prompt'
     );

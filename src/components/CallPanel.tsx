@@ -13,6 +13,8 @@ import { Avatar, IconButton, minutes } from './Common';
 import { Media } from './Media';
 import { installSoundActivation } from '../lib/sounds';
 import { AudioSettingsDialog } from './AudioSettings';
+import { usePushToTalk } from './usePushToTalk';
+import { keyName } from '../lib/audio-preferences';
 import { useCallActivity } from './useCallActivity';
 import { ParticipantVolume } from './ParticipantVolume';
 import { useParticipantVolumes } from '../lib/participant-volume';
@@ -55,6 +57,10 @@ export function CallPanel({
             ? 'voice'
             : state.channels.find((c) => c.scope === call.scope)?.name ||
               'Private call';
+    const { pushToTalk, pushToTalkKey } = usePushToTalk(
+        client,
+        container?.ownerDocument.defaultView
+    );
     const captureDevices = () =>
         panel.current?.ownerDocument.defaultView?.navigator.mediaDevices;
 
@@ -496,6 +502,15 @@ export function CallPanel({
                     label="Audio settings"
                     onClick={() => setAudioSettings(true)}
                 />
+                {pushToTalk && !call.muted && !call.deafened && (
+                    <span
+                        className={`push-to-talk ${call.talking ? 'talking' : ''}`}
+                    >
+                        {call.talking
+                            ? 'Talking'
+                            : `Hold ${keyName(pushToTalkKey)} to talk`}
+                    </span>
+                )}
                 <span className="control-separator" />
                 <button
                     className="leave-call"

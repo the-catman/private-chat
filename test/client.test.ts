@@ -83,6 +83,8 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
     ]);
     const boot = crypto.randomUUID();
     const { client } = clientFor(alice, [alice, bob], boot);
+    // Caught up, so a clear arriving now was made just now.
+    await client.receive({ type: 'history-end' });
     const dm = await seal(
         bob,
         [alice, bob],
@@ -99,7 +101,6 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
     await client.receive({ type: 'message', envelope: room, received: 2 });
     client.pending.set(room.id, room);
     client.update({
-        unread: { room: 2 },
         typing: { [`room:${bob.id}`]: Date.now() + 3000 },
     });
     const inFlight = await seal(bob, [alice, bob], boot, 'room', 'chat', {
@@ -125,7 +126,7 @@ test('clearing a conversation drops pending and in-flight content, preserves DMs
         [dm.id]
     );
     assert.equal(client.pending.size, 0);
-    assert.equal(client.state.unread.room, 0);
+    assert.equal(client.state.unread.room, undefined);
     assert.deepEqual(client.state.typing, {});
     const fresh = await seal(bob, [alice, bob], boot, 'room', 'chat', {
         kind: 'text',
@@ -227,6 +228,7 @@ test('notification sounds distinguish live messages from history, replay, edits 
             screen: false,
             screenAudio: false,
             screenAudioAvailable: false,
+            talking: false,
             noiseReduction: 'browser',
             noisePending: false,
             local: { mic: null, camera: null, screen: null },
@@ -1038,4 +1040,149 @@ test('channel messages are accepted, a deleted channel closes, and a signed clea
     await client.receive({ type: 'channels', channels: [] });
     assert.equal(client.state.scope, 'room');
     assert.deepEqual(client.state.channels, []);
+});
+
+test('unread counts follow read marks: a shown conversation is read, a reconnect or reload does not recount, a hidden tab counts, muted ones count mentions', async () => {
+    const memory = new Map<string, string>();
+    globalThis.localStorage ??= {
+        getItem: (key: string) => memory.get(key) ?? null,
+        setItem: (key: string, value: string) => memory.set(key, value),
+        removeItem: (key: string) => memory.delete(key),
+    } as unknown as Storage;
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const cues: SoundCue[] = [];
+    const { client } = clientFor(alice, [alice, bob], boot, (cue) =>
+        cues.push(cue)
+    );
+    const dm = dmScope(alice.id, bob.id);
+    const history: { envelope: Envelope; received: number }[] = [];
+    const say = async (scope: string, text: string) => {
+        const envelope = await seal(bob, [alice, bob], boot, scope, 'chat', {
+            kind: 'text',
+            text,
+        });
+        history.push({ envelope, received: history.length + 1 });
+        await client.receive({ type: 'message', ...history.at(-1)! });
+    };
+    const connect = async (target = client) => {
+        await target.receive({
+            type: 'ready',
+            boot,
+            peers: client.state.peers,
+            channels: [],
+        });
+        for (const item of history)
+            await target.receive({ type: 'message', ...item });
+        await target.receive({ type: 'history-end' });
+    };
+    await connect();
+    await say('room', 'Read as it arrives');
+    await say(dm, 'Waiting in a DM');
+    await say(dm, `@${alice.id} are you there?`);
+    assert.deepEqual(client.state.unread, { [dm]: 2 });
+    assert.deepEqual(client.state.mentioned, { [dm]: 1 });
+    client.select(dm);
+    assert.deepEqual(client.state.unread, {});
+    client.select('room');
+    // The same history again, after a reconnect or in a reloaded tab.
+    await connect();
+    assert.deepEqual(client.state.unread, {});
+    const reloaded = clientFor(alice, [alice, bob], boot).client;
+    await connect(reloaded);
+    assert.deepEqual(reloaded.state.unread, {});
+
+    // While the tab is hidden, the open conversation counts too.
+    const shown = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    Object.defineProperty(globalThis, 'document', {
+        configurable: true,
+        value: { visibilityState: 'hidden' },
+    });
+    try {
+        await say('room', 'Sent while the tab was hidden');
+        assert.deepEqual(client.state.unread, { room: 1 });
+    } finally {
+        if (shown) Object.defineProperty(globalThis, 'document', shown);
+        else delete (globalThis as { document?: unknown }).document;
+    }
+    client.markSeen();
+    assert.deepEqual(client.state.unread, {});
+
+    // A muted conversation stays quiet, except for mentions.
+    client.setMuted(dm, true);
+    cues.length = 0;
+    await say(dm, 'Nothing urgent');
+    await say(dm, `Thanks @${alice.id}`);
+    assert.deepEqual(cues, ['received']);
+    assert.deepEqual(client.state.unread, { [dm]: 2 });
+    assert.deepEqual(client.state.mentioned, { [dm]: 1 });
+    assert.deepEqual(JSON.parse(localStorage.getItem('hush-muted')!), [dm]);
+    client.setMuted(dm, false);
+    assert.equal(localStorage.getItem('hush-muted'), null);
+});
+
+test('a clear replayed after a reload keeps what came after it readable, and forgets the keys of what it removed', async () => {
+    const memory = new Map<string, string>();
+    globalThis.localStorage ??= {
+        getItem: (key: string) => memory.get(key) ?? null,
+        setItem: (key: string, value: string) => memory.set(key, value),
+        removeItem: (key: string) => memory.delete(key),
+    } as unknown as Storage;
+    const [alice, bob] = await Promise.all([
+        createIdentity(),
+        createIdentity(),
+    ]);
+    const boot = crypto.randomUUID();
+    const say = (text: string) =>
+        seal(bob, [alice, bob], boot, 'room', 'chat', { kind: 'text', text });
+    const connect = async (
+        client: ChatClient,
+        replay: Parameters<ChatClient['receive']>[0][]
+    ) => {
+        await client.receive({
+            type: 'ready',
+            boot,
+            peers: client.state.peers,
+            channels: [],
+        });
+        for (const packet of replay) await client.receive(packet);
+        await client.receive({ type: 'history-end' });
+    };
+    // Alice reads a message, then misses Bob clearing the room.
+    const first = clientFor(alice, [alice, bob], boot).client;
+    await connect(first, []);
+    const before = await say('Before the clear');
+    await first.receive({ type: 'message', envelope: before, received: 1 });
+    assert.ok(alice.ratchet.recall(before.id, bob.id));
+    const marker = await clearedBy(bob, boot, 'room');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const after = await say('After the clear');
+
+    // She reloads within moments: the server replays the clear, then what
+    // followed it.
+    const reloaded = clientFor(alice, [alice, bob], boot).client;
+    await connect(reloaded, [
+        marker,
+        { type: 'message', envelope: after, received: 2 },
+    ]);
+    assert.deepEqual(
+        reloaded.state.messages.map((m) => m.payload),
+        [{ kind: 'text', text: 'After the clear' }]
+    );
+    assert.equal(alice.ratchet.recall(before.id, bob.id), undefined);
+    assert.ok(alice.ratchet.recall(after.id, bob.id));
+
+    // And again: the message after the clear is opened from its kept key.
+    const again = clientFor(alice, [alice, bob], boot).client;
+    await connect(again, [
+        marker,
+        { type: 'message', envelope: after, received: 2 },
+    ]);
+    assert.deepEqual(
+        again.state.messages.map((m) => m.payload),
+        [{ kind: 'text', text: 'After the clear' }]
+    );
 });

@@ -514,10 +514,12 @@ export class Ratchet {
         for (const id of ids)
             if (this.opened.delete(id)) this.storage.delete('opened', id);
     }
-    forgetScope(scope: string) {
+    forgetScope(scope: string, keep: ReadonlySet<string> = new Set()) {
         this.forget(
             Array.from(this.opened)
-                .filter(([, record]) => record.scope === scope)
+                .filter(
+                    ([id, record]) => record.scope === scope && !keep.has(id)
+                )
                 .map(([id]) => id)
         );
     }

@@ -28,11 +28,16 @@ import { createChatServer } from '../server/app';
 import { readConfig } from '../server/config';
 import { createDevFrontend } from '../server/frontend';
 import NodeWebSocket from 'ws';
-import { observeSpeaking, checkSpeaking } from './speaking-checks';
+import {
+    observeSpeaking,
+    checkSpeaking,
+    checkPushToTalk,
+} from './speaking-checks';
 import { checkMessageShortcuts } from './shortcut-checks';
 import { checkMessageFeatures } from './message-feature-checks';
 import { checkProfiles } from './profile-checks';
 import { checkChannels } from './channel-checks';
+import { checkNotifications } from './notification-checks';
 import { checkMobileLayout } from './mobile-checks';
 import { checkUiChanges, checkPanelGestures } from './ui-checks';
 import {
@@ -358,6 +363,7 @@ async function checkCalls(alice: Person, bob: Person, charlie: Person) {
     );
 
     await checkSpeaking(alice.page, bob.page);
+    await checkPushToTalk(alice.page, bob.page);
     await checkParticipantVolume(alice.page, bob.page);
     await checkCallLayoutAndNoise(alice.page, bob.page);
     await checkScreenAudioAndPopout(alice.page, bob.page);
@@ -435,6 +441,7 @@ async function run() {
         await checkMessageFeatures(alice.page, bob.page);
         await checkProfiles(alice.page, bob.page);
         await checkChannels(alice, bob);
+        await checkNotifications(alice.page, bob.page);
         assert.deepEqual(errors, []);
         return;
     }
@@ -1239,6 +1246,7 @@ async function run() {
     await checkMessageFeatures(alice.page, bob.page);
     await checkProfiles(alice.page, bob.page);
     await checkChannels(alice, bob);
+    await checkNotifications(alice.page, bob.page);
 
     await checkUiChanges(alice.page, bob.page);
     await checkMobileLayout(alice.page, bob.page);

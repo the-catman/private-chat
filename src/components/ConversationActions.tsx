@@ -11,6 +11,7 @@ export function ConversationActions({
     scope,
     title,
     online,
+    muted,
     share,
     actions = [],
 }: {
@@ -18,6 +19,7 @@ export function ConversationActions({
     scope: string;
     title: string;
     online: boolean;
+    muted: boolean;
     share?: () => void;
     actions?: MenuAction[];
 }) {
@@ -57,6 +59,14 @@ export function ConversationActions({
                     close={closeMenu}
                     actions={[
                         ...actions,
+                        {
+                            label: muted
+                                ? 'Unmute conversation'
+                                : 'Mute conversation',
+                            icon: muted ? 'bell' : 'bellOff',
+                            hint: muted ? undefined : 'Only mentions',
+                            run: () => client.setMuted(scope, !muted),
+                        },
                         ...(share
                             ? [
                                   {

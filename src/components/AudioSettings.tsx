@@ -1,8 +1,9 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useMobilePanel } from './useMobilePanel';
 import { SheetHandle } from './SheetHandle';
 import {
     getAudioPreferences,
+    keyName,
     setAudioPreferences,
     subscribeAudioPreferences,
     type NoiseReduction,
@@ -89,6 +90,21 @@ export function AudioSettingsFields({
                     Enhanced filters background noise on your device. It uses
                     more CPU.
                 </p>
+                <label className="audio-toggle">
+                    <input
+                        type="checkbox"
+                        checked={prefs.pushToTalk}
+                        onChange={(event) =>
+                            setAudioPreferences({
+                                pushToTalk: event.target.checked,
+                            })
+                        }
+                    />
+                    Push to talk
+                </label>
+                {prefs.pushToTalk && (
+                    <PushToTalkKey code={prefs.pushToTalkKey} />
+                )}
                 {call?.noisePending ? (
                     <p role="status">Changing microphone processing…</p>
                 ) : (
@@ -126,6 +142,51 @@ export function AudioSettingsFields({
                 </p>
             </fieldset>
         </>
+    );
+}
+
+// Press the button, then the key to hold while talking.
+function PushToTalkKey({ code }: { code: string }) {
+    const [listening, setListening] = useState(false);
+    const chosen = useRef(false);
+    return (
+        <div className="push-to-talk-key">
+            <span id="push-to-talk-key">Key</span>
+            <button
+                className="subtle-button"
+                aria-labelledby="push-to-talk-key push-to-talk-value"
+                aria-pressed={listening}
+                onClick={() => {
+                    if (chosen.current) chosen.current = false;
+                    else setListening(true);
+                }}
+                onBlur={() => setListening(false)}
+                onKeyDown={(event) => {
+                    if (!listening) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    // These keys keep their usual jobs.
+                    if (
+                        !['Escape', 'Tab', 'Enter', 'Backspace'].includes(
+                            event.key
+                        ) &&
+                        /^[A-Za-z0-9]{1,24}$/.test(event.code)
+                    ) {
+                        setAudioPreferences({ pushToTalkKey: event.code });
+                        // Space and Enter would press this button again.
+                        chosen.current = true;
+                    }
+                    setListening(false);
+                }}
+                onKeyUp={() => {
+                    setTimeout(() => (chosen.current = false));
+                }}
+            >
+                <span id="push-to-talk-value">
+                    {listening ? 'Press a key…' : keyName(code)}
+                </span>
+            </button>
+        </div>
     );
 }
 

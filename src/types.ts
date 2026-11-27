@@ -85,6 +85,8 @@ export type Message = {
     edited?: boolean;
     sharedBy?: string;
     historyGrant?: Envelope;
+    // When the server stored it, on the server's clock; marks what is read.
+    received?: number;
     // File bytes stay in memory only. Progress is set while parts transfer.
     bytes?: Uint8Array<ArrayBuffer>;
     progress?: number;
@@ -141,6 +143,8 @@ export type MediaState = {
     screenAudio: boolean;
 };
 export type CallState = MediaState & {
+    // Push to talk is on and its key is held.
+    talking: boolean;
     noiseReduction: import('./lib/audio-preferences').NoiseReduction;
     noisePending: boolean;
     screenAudioAvailable: boolean;
@@ -246,6 +250,10 @@ export type ChatState = {
     notice: string;
     typing: Record<string, number>;
     unread: Record<string, number>;
+    // Unread mentions of you and replies to you.
+    mentioned: Record<string, number>;
+    // Conversations that only count mentions and stay quiet otherwise.
+    muted: string[];
     // By message ID, then by author.
     reactions: Record<string, Record<string, Reaction>>;
     pins: Record<string, Pin>;

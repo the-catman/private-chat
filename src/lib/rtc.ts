@@ -114,6 +114,7 @@ export class CallEngine {
             scope: this.scope,
             started: this.started,
             ...this.state,
+            talking: this.pushToTalk && this.talking,
             noiseReduction: this.noiseReduction,
             noisePending: this.noisePending,
             screenAudioAvailable: Boolean(
@@ -217,10 +218,13 @@ export class CallEngine {
             screen: false,
             screenAudio: false,
         };
+        this.talking = false;
+        this.pushToTalk = getAudioPreferences().pushToTalk;
         this.applyMute();
-        this.unsubscribeAudio = subscribeAudioPreferences(() =>
-            this.syncNoisePreference()
-        );
+        this.unsubscribeAudio = subscribeAudioPreferences(() => {
+            this.syncNoisePreference();
+            this.syncPushToTalk();
+        });
         this.syncNoisePreference();
         this.emit();
         this.wire({ type: 'call', scope });
@@ -600,7 +604,7 @@ export class CallEngine {
                     return;
                 }
                 next.stream.getAudioTracks().forEach((track) => {
-                    track.enabled = !this.state.muted && !this.state.deafened;
+                    track.enabled = this.live;
                 });
                 await this.replace('mic', next.stream, false);
                 if (!this.scope || operation !== this.operation) {
@@ -702,10 +706,34 @@ export class CallEngine {
         this.applyMute();
         this.publishState();
     }
+    // Push to talk keeps the microphone off except while its key is held.
+    private talking = false;
+    private pushToTalk = getAudioPreferences().pushToTalk;
+    private get live() {
+        return (
+            !this.state.muted &&
+            !this.state.deafened &&
+            (!this.pushToTalk || this.talking)
+        );
+    }
+    talk(held: boolean) {
+        if (this.talking === held) return;
+        this.talking = held;
+        this.applyMute();
+        this.emit();
+    }
+    private syncPushToTalk() {
+        const next = getAudioPreferences().pushToTalk;
+        if (next === this.pushToTalk) return;
+        this.pushToTalk = next;
+        this.talking = false;
+        this.applyMute();
+        this.emit();
+    }
     private applyMute() {
         for (const stream of [this.rawMic, this.media.mic])
             stream?.getAudioTracks().forEach((track) => {
-                track.enabled = !this.state.muted && !this.state.deafened;
+                track.enabled = this.live;
             });
     }
     async replace(
